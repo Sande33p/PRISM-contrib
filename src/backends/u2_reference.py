@@ -134,6 +134,8 @@ class ExecutionControl:
             self._check_live()
             try:
                 ids = _token_ids(token_ids, "committed IDs", 129)
+                # Iteration may execute driver code that stops or cancels work.
+                self._check_live()
                 if self._in_flight or self._eoa:
                     raise ValueError("commit after EOA or during model call")
                 if any(token >= self._identity.vocab_size for token in ids):
@@ -146,6 +148,8 @@ class ExecutionControl:
                     raise ValueError("EOA must occur once at the end of a commit")
                 if len(self._output) + len(output) > self._request.max_new_tokens:
                     raise ValueError("output limit exceeded")
+            except _Stopped:
+                raise
             except Exception as exc:
                 self._fail("invalid_commit")
                 raise _ProtocolError("invalid_commit") from exc

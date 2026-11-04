@@ -282,6 +282,83 @@ class AdapterAcceptanceTests(unittest.TestCase):
         self.assertEqual(result.output_ids, ())
         self.assertEqual(result.error_code, "invalid_commit")
 
+    def test_lazy_commit_preserves_budget_and_cancellation_receipts(self):
+        def check_stop(reason, swallow_stop):
+            invoked = []
+            cancellation_signals = []
+
+            def generate(value, control):
+                control.run_model_call(3, lambda: invoked.append("prefix"))
+                control.commit((6,))
+
+                def operation():
+                    invoked.append("lazy")
+                    cancellation_signals.append(adapter.cancel(value.request_id))
+                    return 8
+
+                def tokens():
+                    yield 7
+                    try:
+                        yield control.run_model_call(5, operation)
+                    except Exception:
+                        if not swallow_stop:
+                            raise
+                    yield 9
+
+                control.commit(tokens())
+                return "eoa"
+
+            driver = Runtime(generate)
+            adapter = U2ReferenceAdapter(driver)
+            value = request(max_model_calls=1 if reason == "budget" else 2)
+            result = adapter.generate(value)
+            calls, positions = (1, 3) if reason == "budget" else (2, 8)
+            self.assertEqual(result.finish_reason, reason)
+            self.assertIsNone(result.error_code)
+            self.assertFalse(result.eoa_observed)
+            self.assertEqual(result.output_ids, (6,))
+            self.assertEqual(result.committed_block_ends, (1,))
+            self.assertEqual(
+                result.usage,
+                UsageReceipt(3, 1, calls, positions, calls, positions, True),
+            )
+            self.assertIs(adapter.generate(value), result)
+            self.assertEqual(len(driver.calls), 1)
+            self.assertEqual(invoked, ["prefix"] if reason == "budget" else ["prefix", "lazy"])
+            self.assertEqual(cancellation_signals, [] if reason == "budget" else [True])
+
+        for reason in ("budget", "cancelled"):
+            for swallow_stop in (False, True):
+                with self.subTest(reason=reason, swallow_stop=swallow_stop):
+                    check_stop(reason, swallow_stop)
+
+    def test_cancellation_during_lazy_commit_without_a_call_discards_pending_block(self):
+        cancellation_signals = []
+
+        def generate(value, control):
+            control.run_model_call(3, lambda: None)
+            control.commit((6,))
+
+            def tokens():
+                yield 7
+                cancellation_signals.append(adapter.cancel(value.request_id))
+                yield 8
+
+            control.commit(tokens())
+            return "eoa"
+
+        driver = Runtime(generate)
+        adapter = U2ReferenceAdapter(driver)
+        result = adapter.generate(request())
+        self.assertEqual(cancellation_signals, [True])
+        self.assertEqual(result.finish_reason, "cancelled")
+        self.assertIsNone(result.error_code)
+        self.assertEqual(result.output_ids, (6,))
+        self.assertEqual(result.committed_block_ends, (1,))
+        self.assertEqual(result.usage, UsageReceipt(3, 1, 1, 3, 1, 3, True))
+        self.assertIs(adapter.generate(request()), result)
+        self.assertEqual(len(driver.calls), 1)
+
     def test_call_or_commit_after_eoa_is_rejected_without_losing_prior_output(self):
         for event in ("call", "commit"):
             with self.subTest(event=event):
