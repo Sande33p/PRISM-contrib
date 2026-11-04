@@ -196,6 +196,7 @@ Recorded experiment outcomes. These are dated reports, not usage guides.
 |----------|-------------|
 | [api/model.md](api/model.md) | `UnifiedTransformer` and `ModelConfig`: the four forward stages, presets, decoder registry |
 | [api/reference-text.md](api/reference-text.md) | Injected text-reference protocol, committed output, usage and process-local replay; offline contract scope |
+| [api/denoising-text.md](api/denoising-text.md) | Offline pretokenized denoising compiler, visibility oracle and named same-position loss reductions |
 | [api/encoders.md](api/encoders.md) | The `ModalityEncoder` contract, the eight encoders, optional-dependency gating |
 | [api/modules.md](api/modules.md) | Projectors, MoE, attention, and LM head: the reusable blocks |
 
