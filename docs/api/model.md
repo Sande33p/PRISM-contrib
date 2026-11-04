@@ -157,6 +157,10 @@ generation behavior are unchanged. No backend wrapper or persistent descriptor
 is added to the model state, and old checkpoints require no migration. U2
 adapters, new objectives, model assets, and training remain separate work.
 
+An additive [text-reference protocol](reference-text.md) provides an explicitly
+injected runtime boundary and versioned API route for offline contract tests.
+It does not activate the planned U2 selectors or provide a pretrained driver.
+
 ## Decoders
 
 `src/decoders/` — the output side, registered by name in `DECODERS`
