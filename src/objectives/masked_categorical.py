@@ -111,6 +111,7 @@ def masked_categorical_sums(
 
     FP16/BF16/FP32 logits use FP32 CE as in the reference. FP64 remains FP64
     for high-precision numerical fixtures; this is not model/dtype parity.
+    Positive supervised weights must survive conversion to that compute dtype.
     An empty/all-ignored pack retains a finite zero connected to its logits.
     """
     coefficient = _coefficient(text_coefficient, "text_coefficient")
@@ -147,11 +148,17 @@ def masked_categorical_sums(
 
     dtype = torch.float64 if logits.dtype == torch.float64 else torch.float32
     scores = logits.to(dtype=dtype)
-    target_weights = weights.detach().to(dtype=dtype)[supervised]
+    fixed_weights = weights.detach().to(dtype=dtype)
+    if bool((supervised & weights.gt(0) & fixed_weights.eq(0)).any()):
+        raise ValueError("positive weights underflow the computation dtype; use float64 logits")
+    target_weights = fixed_weights[supervised]
     count = target_weights.sum().detach()
-    if bool(supervised.any()):
-        losses = F.cross_entropy(scores[supervised], labels[supervised], reduction="none")
-        numerator = (losses * target_weights).sum() * coefficient
+    active = supervised & fixed_weights.gt(0)
+    if bool(active.any()) and coefficient > 0:
+        # Exclude zero-weight targets before CE: finite extreme logits can
+        # produce an infinite CE, and multiplying that by zero would be NaN.
+        losses = F.cross_entropy(scores[active], labels[active], reduction="none")
+        numerator = (losses * fixed_weights[active]).sum() * coefficient
     else:
         numerator = (scores * 0.0).sum()
     return MaskedCategoricalSums(numerator, count, int(supervised.sum().item()))
@@ -186,6 +193,8 @@ def reduce_masked_categorical(
     times its numerator divided by that global count. Do not divide again by
     accumulation count. An averaging shared-model gradient reducer then agrees
     with the scalar objective; no collective or trainer behavior is implemented.
+    If world_size/count cannot fit the backward dtype, reduction rejects it
+    explicitly instead of silently clamping or returning nonfinite gradients.
 
     Nonzero global-policy router weight requires the explicit auxiliary policy
     ``rank_mean_of_microbatch_means_v1``: average supplied router scalars within
@@ -253,6 +262,15 @@ def reduce_masked_categorical(
     _floating(global_weight, "global effective weight", scalar=True)
     skip = bool(global_weight == 0)
     world_size = len(rank_packs)
+    if (
+        policy == GLOBAL_POLICY
+        and not skip
+        and float(global_weight) < world_size / torch.finfo(global_weight.dtype).max
+    ):
+        raise ValueError(
+            "global effective weight is too small for finite per-rank backward scaling; "
+            "use float64 logits and weights or rescale the weights"
+        )
     main_backwards = []
     router_backwards = []
     for index, packs in enumerate(rank_packs):
@@ -270,7 +288,7 @@ def reduce_masked_categorical(
         else:
             numerator = sum((pack.numerator for pack in packs), zero)
             main = numerator * 0.0 if skip else numerator / global_weight * world_size
-        if auxiliaries is None:
+        if auxiliaries is None or coefficient == 0:
             router = zero
         elif policy == REFERENCE_POLICY:
             router = sum(

@@ -157,7 +157,11 @@ invariant to repartitioning. The global policy is a separately named objective,
 not exact upstream loss reproduction. Its `per_rank_backward` main terms are
 `world_size * local_sum_N / global_sum_C`; averaging shared-model gradients
 then matches the scalar objective. Do not additionally divide by accumulation
-count. These are algebraic results; no distributed process group is launched.
+count. Positive weights that underflow the computation dtype, or a global
+weight so small that `world_size / global_weight` cannot fit the backward
+dtype, fail explicitly. Use FP64 logits/weights or rescale weights in that case;
+the denominator is never silently clamped. These are algebraic results; no
+distributed process group is launched.
 
 Router scalars are supplied separately for every pack. Reference reduction uses
 the same count weights as upstream (optional name
@@ -171,7 +175,9 @@ and `loss = main_loss + router_loss`.
 Zero global supervised weight yields finite zero main loss and
 `supervised_skip=True`; a separately selected router term may still contribute.
 Supplied all-ignored or zero-weight logits retain connected finite zero
-gradients. With no terms at all, the result is detached zero unless a graph is
+gradients. Zero-weight targets and zero text/router coefficients bypass unused
+loss computations, avoiding `infinity * 0` from otherwise finite extreme inputs.
+With no terms at all, the result is detached zero unless a graph is
 supplied through `zero_anchor` or auxiliaries. No optimizer step is performed.
 
 ## Source provenance and verification boundary

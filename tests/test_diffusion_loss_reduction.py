@@ -68,6 +68,71 @@ def test_text_coefficient_changes_numerator_only():
     assert scaled.effective_weight.item() == first.effective_weight.item() == 4
 
 
+@pytest.mark.parametrize("mixed", [False, True])
+def test_zero_weight_extreme_logits_do_not_evaluate_unneeded_ce(mixed):
+    values = [[-3e38, 3e38]] + ([[0.0, 0.0]] if mixed else [])
+    logits = torch.tensor(values, requires_grad=True)
+    labels = torch.zeros(len(values), dtype=torch.long)
+    weights = torch.tensor([0.0] + ([1.0] if mixed else []))
+    terms = masked_categorical_sums(logits, labels, weights)
+    result = reduce_masked_categorical([[terms]], policy=GLOBAL_POLICY)
+    assert terms.supervised_tokens == len(values)
+    assert result.loss.item() == pytest.approx(LN2 if mixed else 0.0)
+    result.loss.backward()
+    assert torch.isfinite(logits.grad).all()
+    torch.testing.assert_close(logits.grad[0], torch.zeros(2))
+    if mixed:
+        torch.testing.assert_close(logits.grad[1], torch.tensor([-0.5, 0.5]))
+
+
+def test_zero_text_coefficient_retains_count_and_finite_zero_gradient():
+    logits = torch.tensor([[-3e38, 3e38]], requires_grad=True)
+    terms = masked_categorical_sums(logits, torch.tensor([0]), torch.ones(1), text_coefficient=0.0)
+    assert terms.effective_weight.item() == 1
+    assert terms.numerator.item() == 0
+    terms.numerator.backward()
+    torch.testing.assert_close(logits.grad, torch.zeros_like(logits))
+
+
+@pytest.mark.parametrize("policy", [REFERENCE_POLICY, GLOBAL_POLICY])
+def test_zero_router_coefficient_skips_overflowing_unused_sum(policy):
+    auxiliaries = [torch.tensor(1e308, dtype=torch.float64, requires_grad=True) for _ in range(2)]
+    result = reduce_masked_categorical(
+        [[_zero_pack(), _zero_pack()]],
+        policy=policy,
+        router_aux=[auxiliaries],
+        router_weight=0.0,
+    )
+    assert result.loss.item() == result.router_loss.item() == 0
+    result.loss.backward()
+    assert all(value.grad.item() == 0 for value in auxiliaries)
+
+
+def test_global_backward_scale_must_fit_computation_dtype():
+    logits = torch.zeros((1, 2), requires_grad=True)
+    term = masked_categorical_sums(logits, torch.tensor([0]), torch.tensor([1e-38]))
+    # 1/C fits FP32, but the exposed four-rank local backward scale 4/C does not.
+    with pytest.raises(ValueError, match="finite per-rank backward scaling"):
+        reduce_masked_categorical([[term], [], [], []], policy=GLOBAL_POLICY)
+    reference = reduce_masked_categorical([[term]], policy=REFERENCE_POLICY)
+    assert torch.isfinite(reference.loss)
+    precise = torch.zeros((1, 2), dtype=torch.float64, requires_grad=True)
+    term64 = masked_categorical_sums(
+        precise, torch.tensor([0]), torch.tensor([1e-40], dtype=torch.float64)
+    )
+    result = reduce_masked_categorical([[term64]], policy=GLOBAL_POLICY)
+    result.loss.backward()
+    assert result.loss.item() == pytest.approx(LN2)
+    torch.testing.assert_close(precise.grad, torch.tensor([[-0.5, 0.5]], dtype=torch.float64))
+
+
+def test_positive_supervised_weights_cannot_silently_underflow_to_zero():
+    with pytest.raises(ValueError, match="underflow the computation dtype"):
+        masked_categorical_sums(
+            torch.zeros((1, 2)), torch.tensor([0]), torch.tensor([1e-50], dtype=torch.float64)
+        )
+
+
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32, torch.float64])
 def test_compute_dtype_and_finite_cpu_gradients(dtype):
     logits = torch.tensor([[0.1, -0.2]], dtype=dtype, requires_grad=True)
