@@ -4,6 +4,12 @@ defaults:
   - training: zone_a
   - exp: defaults
 
+# None preserves the model preset's existing local/HF backbone selection.
+# These shared defaults also expose ordinary model.backend=... CLI overrides.
+model:
+  backend: null
+  backend_contract_version: 1
+
 hydra:
   run:
     dir: outputs/${exp.id}/${now:%Y-%m-%d}/${now:%H-%M-%S}

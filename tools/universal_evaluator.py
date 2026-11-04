@@ -89,6 +89,7 @@ except ImportError:
 # Add src to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 
+from src.backends import resolve_backend
 from src.config import ModelConfig
 from src.data.multimodal import StreamingMultimodalDataset, _get_modality
 from src.decoders import remap_legacy_decoder_keys
@@ -526,9 +527,13 @@ def setup_model(checkpoint_path, model_config=None, backbone_id=None):
     """Unified Model Loading Logic."""
     print(f"Using HF_HOME={os.environ.get('HF_HOME', 'default')}, offline={os.environ.get('HF_HUB_OFFLINE', '0')}")
 
-    def _load_model_config_from_yaml(config_path: str, detected_d_model: int, backbone_override: str | None):
+    def _load_model_config_from_yaml(
+        config_path: str,
+        detected_d_model: int,
+        backbone_override: str | None,
+        model_cfg: dict,
+    ):
         """Build ModelConfig from either a model YAML or a Hydra run config.yaml."""
-        model_cfg = _load_resolved_model_config(config_path)
 
         ts_projector = str(model_cfg.get("ts_projector", "linear"))
         patch_lens = model_cfg.get("timeomni_patch_len", 16)
@@ -572,6 +577,8 @@ def setup_model(checkpoint_path, model_config=None, backbone_id=None):
         llm_tokenizer_id = model_cfg.get("tokenizer_id", llm_backbone_id)
 
         return ModelConfig(
+            backend=model_cfg.get("backend"),
+            backend_contract_version=model_cfg.get("backend_contract_version", 1),
             llm_backbone_id=llm_backbone_id,
             llm_tokenizer_id=llm_tokenizer_id,
             freeze_backbone=bool(model_cfg.get("freeze_backbone", True)),
@@ -627,6 +634,37 @@ def setup_model(checkpoint_path, model_config=None, backbone_id=None):
     if not os.path.exists(ckpt_file):
         raise FileNotFoundError(f"Checkpoint not found at {ckpt_file}")
 
+    if model_config is None:
+        ckpt_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(ckpt_file))))
+        hydra_config_path = os.path.join(ckpt_root, ".hydra", "config.yaml")
+        if os.path.isfile(hydra_config_path):
+            print(f"No --model_config provided; falling back to Hydra config: {hydra_config_path}")
+            model_config = hydra_config_path
+
+    if model_config is None and backbone_id is None:
+        raise ValueError("Must provide at least one of model_config or backbone_id to setup_model")
+
+    # Parse and validate saved selectors before loading checkpoint tensors.
+    # Reuse only the resolved model subtree so unrelated Hydra interpolation
+    # cannot affect admission or change between validation and construction.
+    resolved_model_cfg = None
+    preset_config = None
+    if model_config:
+        if os.path.isfile(model_config):
+            resolved_model_cfg = _load_resolved_model_config(model_config)
+            effective_backbone_id = resolved_model_cfg.get("backbone_id", backbone_id)
+            if backbone_id:
+                effective_backbone_id = backbone_id
+            resolve_backend(
+                backend=resolved_model_cfg.get("backend"),
+                llm_backbone_id=effective_backbone_id,
+                contract_version=resolved_model_cfg.get("backend_contract_version", 1),
+            )
+        else:
+            preset_config = ModelConfig.from_preset(model_config)
+    else:
+        resolve_backend(llm_backbone_id=backbone_id)
+
     print("Probing checkpoint for model dimensions...")
     state_dict = load_file(ckpt_file)
     # Detect d_model from backbone embed_tokens or projector output dim
@@ -649,22 +687,14 @@ def setup_model(checkpoint_path, model_config=None, backbone_id=None):
 
 
 
-    if model_config is None:
-        ckpt_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(ckpt_file))))
-        hydra_config_path = os.path.join(ckpt_root, ".hydra", "config.yaml")
-        if os.path.isfile(hydra_config_path):
-            print(f"No --model_config provided; falling back to Hydra config: {hydra_config_path}")
-            model_config = hydra_config_path
-
-    if model_config is None and backbone_id is None:
-        raise ValueError("Must provide at least one of model_config or backbone_id to setup_model")
-    
     if model_config:
         print(f"Loading Model Config ({model_config})...")
-        if os.path.isfile(model_config):
-            model_config = _load_model_config_from_yaml(model_config, d_model, backbone_id)
+        if resolved_model_cfg is not None:
+            model_config = _load_model_config_from_yaml(
+                model_config, d_model, backbone_id, resolved_model_cfg
+            )
         else:
-            model_config = ModelConfig.from_preset(model_config)
+            model_config = preset_config
     else:
         print(f"No model config provided, using default backbone_id={backbone_id} with minimal config.")
         model_config = ModelConfig(

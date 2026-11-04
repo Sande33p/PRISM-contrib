@@ -285,6 +285,8 @@ def build_model_config(cfg: DictConfig, rank: int = 0) -> ModelConfig:
             )
 
     model_config = ModelConfig(
+        backend=cfg.model.get("backend", None),
+        backend_contract_version=cfg.model.get("backend_contract_version", 1),
         llm_backbone_id=cfg.model.backbone_id,
         llm_tokenizer_id=cfg.model.get("tokenizer_id", cfg.model.backbone_id),
         freeze_backbone=cfg.model.freeze_backbone,

@@ -54,6 +54,7 @@ from fastapi import FastAPI, HTTPException
 from PIL import Image
 from pydantic import BaseModel
 from safetensors.torch import load_file
+from src.backends import resolve_backend
 from src.config import ModelConfig
 from src.model import UnifiedTransformer
 from torchvision import transforms
@@ -139,13 +140,16 @@ def _read_hydra_config(ckpt_dir: str) -> dict[str, Any]:
                 with open(hydra_path) as f:
                     cfg = yaml.safe_load(f)
                 return {
+                    "backend": cfg.get("model", {}).get("backend"),
+                    "backend_contract_version": cfg.get("model", {}).get(
+                        "backend_contract_version", 1
+                    ),
                     "backbone_id": cfg.get("model", {}).get("backbone_id"),
                     "modalities": cfg.get("model", {}).get("modalities"),
                     "d_img": cfg.get("model", {}).get("d_img", 768),
                 }
             except Exception as e:
-                logger.warning("[Config] Failed to parse %s: %s", hydra_path, e)
-                return {}
+                raise ValueError(f"Failed to parse saved Hydra config: {hydra_path}") from e
         run_dir = os.path.dirname(run_dir)
     return {}
 
@@ -168,6 +172,13 @@ def load_model() -> None:
     backbone_id = os.environ.get(
         "PRISM_BACKBONE",
         hydra_cfg.get("backbone_id", "allenai/OLMo-1B-0724-hf"),
+    )
+    # Validate the effective saved selector and environment override before
+    # reading checkpoint tensors or invoking any tokenizer/model loader.
+    resolve_backend(
+        backend=hydra_cfg.get("backend"),
+        llm_backbone_id=backbone_id,
+        contract_version=hydra_cfg.get("backend_contract_version", 1),
     )
     d_img = hydra_cfg.get("d_img", 768)
     modalities = hydra_cfg.get("modalities", ["text", "image"])
@@ -208,6 +219,8 @@ def load_model() -> None:
         server_modalities.append("image")
 
     config = ModelConfig(
+        backend=hydra_cfg.get("backend"),
+        backend_contract_version=hydra_cfg.get("backend_contract_version", 1),
         llm_backbone_id=backbone_id,
         freeze_backbone=True,
         freeze_encoders=True,
