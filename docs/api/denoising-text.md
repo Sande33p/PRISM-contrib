@@ -69,7 +69,9 @@ hardware or model context limit.
 
 ## Batch metadata and corruption
 
-All batch tensors are one-dimensional CPU arrays. IDs/labels use int64;
+All batch tensors are one-dimensional CPU arrays, even inside an accelerator
+or meta device context or when the caller changes Torch's default device.
+IDs/labels use int64;
 `valid_mask`, `is_clean`, `corruption_mask` and `supervision_mask` use bool;
 `loss_weights` uses float32. `sample_ids`, `turn_ids`, `type_ids`, `block_ids`
 and `position_ids` describe the packed layout. Labels sit at the same position
@@ -140,7 +142,17 @@ and fixed, finite, nonnegative weights. Invalid positions must already have
 ignored labels; malformed supervision fails. `text_coefficient` multiplies
 the numerator only. It returns a differentiable numerator, detached effective
 weight and nonignored label count. FP16/BF16/FP32 logits compute CE in FP32;
-FP64 is retained for numerical fixtures.
+FP64 is retained for numerical fixtures. Only active rows are selected and
+then cast for CE; the compiler's clean/context/padded rows do not need a full
+FP32 logits copy. Zero-contribution packs use an empty logits slice to retain
+gradient connectivity without a full-size floating-point temporary.
+
+The text coefficient is combined with each detached target weight before
+multiplying CE. This preserves the numerator-only coefficient while avoiding
+an overflowing intermediate backward factor for tiny weights. The coefficient
+must fit the computation dtype's finite range, and positive scaled weights
+must remain finite and nonzero in that dtype. Unsupported coefficient/weight
+combinations fail explicitly, with FP64 recommended for greater range.
 
 Let `N[r,m]` be a pack's weighted numerator and `C[r,m]` its effective weight.
 The outer list passed to reduction represents ranks; each inner list represents

@@ -12,6 +12,7 @@ from src.objectives.masked_categorical import (
     masked_categorical_sums,
     reduce_masked_categorical,
 )
+from torch.utils._python_dispatch import TorchDispatchMode
 
 pytestmark = pytest.mark.unit
 LN2 = math.log(2)
@@ -66,6 +67,63 @@ def test_text_coefficient_changes_numerator_only():
     scaled = masked_categorical_sums(logits, labels, weights, text_coefficient=2.5)
     assert scaled.numerator.item() == pytest.approx(2.5 * first.numerator.item())
     assert scaled.effective_weight.item() == first.effective_weight.item() == 4
+
+
+@pytest.mark.parametrize("world_size,weight", [(1, 1e-38), (4, 2e-38)])
+def test_tiny_weights_and_text_coefficient_have_finite_analytic_gradients(world_size, weight):
+    logits = torch.zeros((1, 2), requires_grad=True)
+    weights = torch.tensor([weight])
+    terms = masked_categorical_sums(logits, torch.tensor([0]), weights, text_coefficient=4.0)
+    ranks = [[terms]] + [[] for _ in range(world_size - 1)]
+    result = reduce_masked_categorical(ranks, policy=GLOBAL_POLICY)
+    assert result.loss.item() == pytest.approx(4 * LN2)
+    assert terms.effective_weight.item() == weights.sum().item()
+    scalar_grad = torch.autograd.grad(result.loss, logits, retain_graph=True)[0]
+    local_grad = torch.autograd.grad(result.per_rank_backward[0], logits)[0]
+    torch.testing.assert_close(scalar_grad, torch.tensor([[-2.0, 2.0]]))
+    torch.testing.assert_close(local_grad, torch.tensor([[-2.0, 2.0]]) * world_size)
+
+
+class FloatAllocationRecorder(TorchDispatchMode):
+    """Observe produced FP32 tensors without allocating a large model-shaped input."""
+
+    def __init__(self):
+        self.shapes = []
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        result = func(*args, **(kwargs or {}))
+        outputs = result if isinstance(result, tuple | list) else (result,)
+        for output in outputs:
+            if isinstance(output, torch.Tensor) and output.dtype == torch.float32:
+                self.shapes.append(tuple(output.shape))
+        return result
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("kind", ["active", "ignored", "zero_weight", "zero_coefficient"])
+def test_float32_temporaries_scale_with_active_rows_not_full_logits(dtype, kind):
+    # Exercise row selection and connected-zero behavior on noncontiguous input.
+    logits = torch.zeros((16, 8), dtype=dtype).T.requires_grad_()
+    labels = torch.full((8,), -100 if kind in ("active", "ignored") else 0)
+    weights = torch.zeros(8) if kind == "zero_weight" else torch.ones(8)
+    if kind == "active":
+        labels[0] = 0
+    coefficient = 0.0 if kind == "zero_coefficient" else 1.0
+    recorder = FloatAllocationRecorder()
+    with recorder:
+        terms = masked_categorical_sums(logits, labels, weights, text_coefficient=coefficient)
+    # Only one vocabulary row is active; the other cases need scalar/count
+    # metadata, never a dense FP32 copy or multiplication of the full logits.
+    assert all(math.prod(shape) <= 16 for shape in recorder.shapes), recorder.shapes
+    assert terms.numerator.dtype == terms.effective_weight.dtype == torch.float32
+    terms.numerator.backward()
+    assert torch.isfinite(logits.grad).all()
+    if kind == "active":
+        torch.testing.assert_close(logits.grad[0].float(), torch.tensor([-15 / 16] + [1 / 16] * 15))
+        assert logits.grad[1:].eq(0).all()
+    else:
+        assert terms.numerator.item() == 0
+        assert logits.grad.eq(0).all()
 
 
 @pytest.mark.parametrize("mixed", [False, True])
@@ -131,6 +189,52 @@ def test_positive_supervised_weights_cannot_silently_underflow_to_zero():
         masked_categorical_sums(
             torch.zeros((1, 2)), torch.tensor([0]), torch.tensor([1e-50], dtype=torch.float64)
         )
+
+
+@pytest.mark.parametrize(
+    "weight,coefficient,message",
+    [
+        (1e-20, 1e39, "text_coefficient exceeds"),
+        (1e-38, 1e-10, "coefficient-scaled weights underflow"),
+        (1e38, 4.0, "coefficient-scaled weights exceed"),
+    ],
+)
+def test_coefficient_scaled_weights_must_fit_computation_dtype(weight, coefficient, message):
+    with pytest.raises(ValueError, match=message):
+        masked_categorical_sums(
+            torch.zeros((1, 2)),
+            torch.tensor([0]),
+            torch.tensor([weight]),
+            text_coefficient=coefficient,
+        )
+    precise = torch.zeros((1, 2), dtype=torch.float64, requires_grad=True)
+    terms = masked_categorical_sums(
+        precise,
+        torch.tensor([0]),
+        torch.tensor([weight], dtype=torch.float64),
+        text_coefficient=coefficient,
+    )
+    result = reduce_masked_categorical([[terms]], policy=GLOBAL_POLICY)
+    result.loss.backward()
+    assert result.loss.item() == pytest.approx(coefficient * LN2, rel=1e-12, abs=0)
+    torch.testing.assert_close(
+        precise.grad, torch.tensor([[-0.5, 0.5]], dtype=torch.float64) * coefficient
+    )
+
+
+@pytest.mark.parametrize("kind", ["ignored", "zero_weight", "zero_coefficient"])
+def test_scalar_prefix_zero_branches_retain_connected_zero(kind):
+    logits = torch.zeros(3, dtype=torch.float16, requires_grad=True)
+    terms = masked_categorical_sums(
+        logits,
+        torch.tensor(-100 if kind == "ignored" else 0),
+        torch.tensor(0.0 if kind == "zero_weight" else 1.0),
+        text_coefficient=0.0 if kind == "zero_coefficient" else 1.0,
+    )
+    assert terms.numerator.dtype == torch.float32
+    assert terms.numerator.item() == 0
+    terms.numerator.backward()
+    torch.testing.assert_close(logits.grad, torch.zeros_like(logits))
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32, torch.float64])

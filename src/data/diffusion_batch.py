@@ -647,6 +647,7 @@ def compile_text_batch(
     tensors = {
         name: torch.tensor(
             values,
+            device="cpu",
             dtype=torch.bool
             if name in boolean_names
             else torch.float32

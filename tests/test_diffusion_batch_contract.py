@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import random
+from contextlib import nullcontext
 from dataclasses import replace
 from unittest.mock import patch
 
@@ -395,6 +396,30 @@ def test_tensor_shapes_dtypes_and_cpu(contract):
                 if name == "loss_weights"
                 else torch.long
             )
+
+
+@pytest.mark.parametrize("ambient_device_mode", ["context", "global_default"])
+def test_compiler_stays_on_cpu_under_ambient_meta_device(contract, ambient_device_mode):
+    inputs = [sample(TextTurn((10,), "context"), TextTurn((11,), "answer"))]
+    expected = compile_text_batch(inputs, contract=contract, block_size=4, pad_to_length=10)
+    previous_device = torch.get_default_device()
+    try:
+        if ambient_device_mode == "global_default":
+            torch.set_default_device("meta")
+        with torch.device("meta") if ambient_device_mode == "context" else nullcontext():
+            assert torch.empty(0).device.type == "meta"  # The ambient override is active.
+            actual = compile_text_batch(inputs, contract=contract, block_size=4, pad_to_length=10)
+            for name, value in vars(actual).items():
+                if isinstance(value, torch.Tensor):
+                    assert value.device.type == "cpu", name
+                    assert torch.equal(value, getattr(expected, name)), name
+            visibility = actual.attention_allowed()
+            assert visibility.device.type == "cpu"
+            assert torch.equal(visibility, expected.attention_allowed())
+    finally:
+        if ambient_device_mode == "global_default":
+            torch.set_default_device(previous_device)
+    assert torch.get_default_device() == previous_device
 
 
 @pytest.mark.parametrize(

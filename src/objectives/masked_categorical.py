@@ -112,6 +112,8 @@ def masked_categorical_sums(
     FP16/BF16/FP32 logits use FP32 CE as in the reference. FP64 remains FP64
     for high-precision numerical fixtures; this is not model/dtype parity.
     Positive supervised weights must survive conversion to that compute dtype.
+    The text coefficient must fit its finite range, and coefficient-scaled
+    active weights must remain finite and positive; otherwise use FP64 logits.
     An empty/all-ignored pack retains a finite zero connected to its logits.
     """
     coefficient = _coefficient(text_coefficient, "text_coefficient")
@@ -147,7 +149,8 @@ def masked_categorical_sums(
         raise ValueError("nonignored labels must be valid vocabulary IDs")
 
     dtype = torch.float64 if logits.dtype == torch.float64 else torch.float32
-    scores = logits.to(dtype=dtype)
+    if coefficient > torch.finfo(dtype).max:
+        raise ValueError("text_coefficient exceeds the computation dtype; use float64 logits")
     fixed_weights = weights.detach().to(dtype=dtype)
     if bool((supervised & weights.gt(0) & fixed_weights.eq(0)).any()):
         raise ValueError("positive weights underflow the computation dtype; use float64 logits")
@@ -157,10 +160,22 @@ def masked_categorical_sums(
     if bool(active.any()) and coefficient > 0:
         # Exclude zero-weight targets before CE: finite extreme logits can
         # produce an infinite CE, and multiplying that by zero would be NaN.
-        losses = F.cross_entropy(scores[active], labels[active], reduction="none")
-        numerator = (losses * fixed_weights[active]).sum() * coefficient
+        scores = logits[active].to(dtype=dtype)
+        scaled_weights = fixed_weights[active] * coefficient
+        if not bool(torch.isfinite(scaled_weights).all()):
+            raise ValueError(
+                "coefficient-scaled weights exceed the computation dtype; use float64 logits"
+            )
+        if bool(scaled_weights.eq(0).any()):
+            raise ValueError(
+                "coefficient-scaled weights underflow the computation dtype; use float64 logits"
+            )
+        losses = F.cross_entropy(scores, labels[active], reduction="none")
+        # Fuse detached metadata before CE so backward applies the tiny weight
+        # together with the coefficient, without an overflowing coefficient/C.
+        numerator = (losses * scaled_weights).sum()
     else:
-        numerator = (scores * 0.0).sum()
+        numerator = logits[..., :0].sum(dtype=dtype)
     return MaskedCategoricalSums(numerator, count, int(supervised.sum().item()))
 
 
