@@ -50,11 +50,13 @@ from typing import Any
 import torch
 import torch.nn as nn
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import APIRouter, FastAPI, HTTPException
 from PIL import Image
 from pydantic import BaseModel
 from safetensors.torch import load_file
+from src.api.u2_reference import reference_router
 from src.backends import resolve_backend
+from src.backends.u2_reference import U2ReferenceAdapter
 from src.config import ModelConfig
 from src.model import UnifiedTransformer
 from torchvision import transforms
@@ -338,18 +340,15 @@ def _extract_prompt_and_image(content) -> tuple[str, Image.Image | None]:
 # ============================================================
 @contextlib.asynccontextmanager
 async def _lifespan(_app: FastAPI):
-    load_model()
+    if _app.state.load_legacy_model_on_startup:
+        load_model()
     yield
 
 
-app = FastAPI(
-    title="PRISM API",
-    description="OpenAI-compatible server for PRISM multimodal model",
-    lifespan=_lifespan,
-)
+legacy_router = APIRouter()
 
 
-@app.get("/v1/models")
+@legacy_router.get("/v1/models")
 async def list_models():
     return {
         "object": "list",
@@ -357,7 +356,7 @@ async def list_models():
     }
 
 
-@app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
+@legacy_router.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def chat_completions(request: ChatCompletionRequest):
     if model is None or tokenizer is None:
         load_model()
@@ -417,6 +416,33 @@ async def chat_completions(request: ChatCompletionRequest):
             total_tokens=prompt_tokens + completion_tokens,
         ),
     )
+
+
+def create_app(
+    *,
+    reference_adapter: U2ReferenceAdapter | None = None,
+    load_legacy_model_on_startup: bool = True,
+) -> FastAPI:
+    """Build an API app with optional, explicitly configured reference execution.
+
+    The default preserves eager legacy-model startup. Disable that startup for
+    reference-only applications and offline protocol tests; the legacy chat
+    route retains its existing lazy-load behavior when called. No reference
+    runtime is constructed by this factory.
+    """
+    application = FastAPI(
+        title="PRISM API",
+        description="OpenAI-compatible server for PRISM multimodal model",
+        lifespan=_lifespan,
+    )
+    application.state.reference_adapter = reference_adapter
+    application.state.load_legacy_model_on_startup = load_legacy_model_on_startup
+    application.include_router(legacy_router)
+    application.include_router(reference_router)
+    return application
+
+
+app = create_app()
 
 
 if __name__ == "__main__":
