@@ -76,10 +76,11 @@ model = UnifiedTransformer(config)
 
 ## Backend metadata contract (version 1)
 
-`src.backends` provides metadata/discovery/resolution only. It imports only the
-standard library and never constructs a model, imports torch/transformers,
-fetches assets, or contacts a network. There is no automatic execution
-integration: callers explicitly pass the selectors to `resolve_backend`.
+`src.backends` provides dependency-free metadata/discovery/resolution. It imports
+only the standard library and never constructs a model, imports
+torch/transformers, fetches assets, or contacts a network. `ModelConfig` and
+`UnifiedTransformer` use this resolver to validate and select their existing
+local/HF construction paths.
 
 ```python
 from src.backends import describe_backend, list_backends, resolve_backend
@@ -118,8 +119,43 @@ requests are rejected first.
 Local `UnifiedTransformer.generate()` currently returns `None`, so local
 generation is not advertised. This contract makes no modality, structured
 decoder, diffusion, training, quality, or accelerator/XPU validation claims,
-and provides no pretrained U2 functionality. Existing construction, Hydra keys,
-`ModelConfig`, checkpoint keys, and APIs are unchanged; no migration is required.
+and provides no pretrained U2 functionality.
+
+### Optional runtime selection
+
+`ModelConfig.backend` defaults to `None`, preserving the existing selection from
+`llm_backbone_id`. Set it to `local_ar` or `hf_ar` to require that specific path;
+it must agree with the backbone ID. `backend_contract_version` defaults to
+integer `1`. Both fields are appended to the dataclass, so existing positional
+arguments and configurations without them retain their meaning.
+
+```python
+config = ModelConfig(backend="local_ar", llm_backbone_id=None)
+config = ModelConfig(backend="hf_ar", llm_backbone_id="allenai/Olmo-3-7B-Instruct")
+```
+
+Hydra exposes `model.backend=null` and `model.backend_contract_version=1` as
+shared defaults. For an existing HF preset, the ordinary override
+`model.backend=hf_ar` makes the selection explicit. The training configuration
+builder forwards values without coercion; `true` or `"1"` is not a valid
+contract version. Config validation is repeated at model construction because
+the dataclass is mutable. Invalid, conflicting, or planned backend selections
+fail before model or encoder loading, with no fallback.
+
+The API server, chat UI, and universal evaluator preserve these fields when
+loading saved Hydra configurations and validate them before loading checkpoint
+tensors or tokenizers. Their existing backbone overrides still apply and must
+agree with an explicit selector. A missing API/UI Hydra configuration retains
+its previous defaults; a present but malformed configuration raises an error
+instead of silently discarding the selection. The UI's standalone text
+comparison requires `autoregressive_generate` when a backend is explicitly
+selected. These routes retain their existing serving and evaluation
+capabilities; the selector does not add local generation.
+
+Existing forward/loss code, checkpoint parameter names, output decoders, and
+generation behavior are unchanged. No backend wrapper or persistent descriptor
+is added to the model state, and old checkpoints require no migration. U2
+adapters, new objectives, model assets, and training remain separate work.
 
 ## Decoders
 

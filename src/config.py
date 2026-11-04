@@ -15,6 +15,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
+from .backends import resolve_backend
 from .modalities import ALL_MODALITIES, Modality, parse_modality
 
 # ts_projector values whose encoder accepts heterogeneous per-sample lengths
@@ -182,7 +183,8 @@ class ModelConfig:
 
     ``__post_init__`` coerces ``modalities`` to ``Modality`` members,
     normalizes and validates ``decoder_loss_weights``, and maps the legacy
-    ``is_vla=True`` flag onto ``output_decoders = ["text", "action"]``.
+    ``is_vla=True`` flag onto ``output_decoders = ["text", "action"]``. It also
+    validates optional backend selection without constructing a model.
 
     Where a field needs explaining it carries an inline or preceding
     comment; the rest are named by their identifier alone. The named entries
@@ -367,6 +369,12 @@ class ModelConfig:
     projector_hidden_mult: int = 1
     projector_num_layers: int = 2
 
+    # Optional explicit selection of the existing execution path. None retains
+    # legacy llm_backbone_id selection; U2 names remain planned and unavailable.
+    # Append fields so existing positional constructor arguments keep their order.
+    backend: str | None = None
+    backend_contract_version: int = 1
+
     def __post_init__(self) -> None:
         # Coerce YAML / CLI / preset strings (and OmegaConf ListConfig elements)
         # into Modality enum members. Hydra structured configs hand us plain
@@ -388,6 +396,12 @@ class ModelConfig:
         # to ["text", "action"] here. Idempotent if already listed.
         if self.is_vla and "action" not in self.output_decoders:
             self.output_decoders = ["text", "action"]
+
+        resolve_backend(
+            backend=self.backend,
+            llm_backbone_id=self.llm_backbone_id,
+            contract_version=self.backend_contract_version,
+        )
 
     @classmethod
     def from_preset(cls, preset_name: str):

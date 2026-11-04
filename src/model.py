@@ -23,6 +23,7 @@ from collections.abc import Mapping
 import torch
 import torch.nn as nn
 
+from .backends import resolve_backend
 from .config import ModelConfig
 from .decoders import (
     DECODERS,
@@ -191,6 +192,13 @@ class UnifiedTransformer(nn.Module):
 
     def __init__(self, config: ModelConfig):
         super().__init__()
+        # Configs are mutable: revalidate the selected path before any model or
+        # encoder is loaded, even when __post_init__ already validated it.
+        backend_descriptor = resolve_backend(
+            backend=config.backend,
+            llm_backbone_id=config.llm_backbone_id,
+            contract_version=config.backend_contract_version,
+        )
         self.config = config
         self.is_vla = config.is_vla
         self._backbone_load_error = None
@@ -200,7 +208,7 @@ class UnifiedTransformer(nn.Module):
         self.backbone_dim = config.d_model
         self.global_step = 0  # For logging purposes
 
-        if config.llm_backbone_id:
+        if backend_descriptor.name == "hf_ar":
             logger.info(f"Initializing HF Backbone: {config.llm_backbone_id}...")
             try:
                 import os

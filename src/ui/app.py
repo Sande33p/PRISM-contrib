@@ -39,6 +39,7 @@ import torch
 import torch.nn as nn
 from PIL import Image
 from safetensors.torch import load_file
+from src.backends import resolve_backend
 from src.config import ModelConfig
 from src.model import UnifiedTransformer
 from torchvision import transforms
@@ -116,7 +117,7 @@ tokenizer = None
 
 
 def _read_hydra_config(ckpt_dir):
-    """Read backbone_id and modalities from the run's Hydra config."""
+    """Read raw backend selection and model fields from the run's Hydra config."""
     # Walk up from checkpoints/step_N to the run dir containing .hydra/
     run_dir = ckpt_dir
     for _ in range(4):  # step_N -> checkpoints -> timestamp -> date -> run_dir
@@ -127,13 +128,16 @@ def _read_hydra_config(ckpt_dir):
                 with open(hydra_path) as f:
                     cfg = yaml.safe_load(f)
                 return {
+                    "backend": cfg.get("model", {}).get("backend"),
+                    "backend_contract_version": cfg.get("model", {}).get(
+                        "backend_contract_version", 1
+                    ),
                     "backbone_id": cfg.get("model", {}).get("backbone_id"),
                     "modalities": cfg.get("model", {}).get("modalities"),
                     "d_img": cfg.get("model", {}).get("d_img", 768),
                 }
             except Exception as e:
-                print(f"[Config] Failed to parse {hydra_path}: {e}")
-                return {}
+                raise ValueError(f"Failed to parse saved Hydra config: {hydra_path}") from e
         run_dir = os.path.dirname(run_dir)
     return {}
 
@@ -152,6 +156,12 @@ def load_model():
     backbone_id = os.environ.get(
         "PRISM_BACKBONE",
         hydra_cfg.get("backbone_id", "allenai/OLMo-1B-0724-hf"),
+    )
+    # Check the effective selection before checkpoint tensors or assets load.
+    resolve_backend(
+        backend=hydra_cfg.get("backend"),
+        llm_backbone_id=backbone_id,
+        contract_version=hydra_cfg.get("backend_contract_version", 1),
     )
     d_img = hydra_cfg.get("d_img", 768)
     modalities = hydra_cfg.get("modalities", ["text", "image"])
@@ -202,6 +212,8 @@ def load_model():
         ui_modalities.append("image")
 
     config = ModelConfig(
+        backend=hydra_cfg.get("backend"),
+        backend_contract_version=hydra_cfg.get("backend_contract_version", 1),
         llm_backbone_id=backbone_id,
         freeze_backbone=True,
         freeze_encoders=True,
@@ -235,7 +247,7 @@ def load_model():
 
 
 def load_text_model():
-    """Load standalone backbone for text-only chat."""
+    """Load the HF comparison model; explicit local backend selection is unsupported."""
     global text_model, tokenizer
     if text_model is not None:
         return
@@ -244,6 +256,15 @@ def load_text_model():
     backbone_id = os.environ.get(
         "PRISM_BACKBONE",
         hydra_cfg.get("backbone_id", "allenai/OLMo-1B-0724-hf"),
+    )
+    # Preserve the legacy direct-HF path when the backend is omitted. Explicit
+    # selections must support this comparison route's autoregressive generation.
+    backend = hydra_cfg.get("backend")
+    resolve_backend(
+        backend=backend,
+        llm_backbone_id=backbone_id,
+        contract_version=hydra_cfg.get("backend_contract_version", 1),
+        required_capabilities=("autoregressive_generate",) if backend is not None else (),
     )
 
     if tokenizer is None:
@@ -396,7 +417,7 @@ DEVICE_LABEL = {
 # Read checkpoint step name for display
 _ckpt_name = os.path.basename(CHECKPOINT_DIR)
 _hydra = _read_hydra_config(CHECKPOINT_DIR)
-_backbone_display = _hydra.get("backbone_id", "unknown").split("/")[-1]
+_backbone_display = str(_hydra.get("backbone_id") or "unknown").split("/")[-1]
 
 with gr.Blocks(title="PRISM Chat") as demo:
     gr.Markdown(
