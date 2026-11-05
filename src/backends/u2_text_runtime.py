@@ -168,9 +168,9 @@ class U2TextRuntime:
             or spec.dtype not in _DTYPES.values()
             or spec.dtype != _DTYPES.get(preflight.dtype or "")
             or not isinstance(spec.device, torch.device)
-            or spec.device.type not in ("cpu", "cuda")
+            or spec.device.type not in ("cpu", "cuda", "xpu")
             or (spec.device.type == "cpu" and spec.device.index is not None)
-            or (spec.device.type == "cuda" and spec.device.index is None)
+            or (spec.device.type in ("cuda", "xpu") and spec.device.index is None)
             or not callable(model)
         ):
             raise ValueError("incompatible local model layout, dtype, device or context capacity")

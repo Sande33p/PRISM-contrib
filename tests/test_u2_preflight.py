@@ -427,3 +427,31 @@ def test_all_special_ids_are_checked_by_preflight(bundle, token):
     )
     assert not result.metadata_complete
     assert any("incompatible token identity" in message for message in result.incompatible)
+
+
+def test_model_and_tokenizer_cardinality_are_distinct(bundle):
+    result = preflight.preflight_u2(*bundle)
+    result.require_metadata()
+    assert result.vocab_size == 160000
+    assert result.tokenizer_vocab_size == len(preflight.SPECIAL_TOKEN_IDS) + 1
+    assert not result.execution_qualified
+
+
+def test_separate_six_file_manifest_does_not_modify_source_bundle(bundle, tmp_path):
+    source, checkpoint, requirements = bundle
+    manifest = tmp_path / "six-source.json"
+    (source / "source-manifest.json").rename(manifest)
+    result = preflight.preflight_u2(source, checkpoint, requirements, source_manifest=manifest)
+    result.require_metadata()
+    assert result.source_verified
+    assert not (source / "source-manifest.json").exists()
+
+
+def test_contained_symlink_is_not_admitted(bundle):
+    source, checkpoint, requirements = bundle
+    target = checkpoint / "config-original.json"
+    (checkpoint / "config.json").rename(target)
+    (checkpoint / "config.json").symlink_to(target)
+    result = preflight.preflight_u2(source, checkpoint, requirements)
+    assert not result.metadata_complete
+    assert any("symlink" in reason for reason in result.incompatible)

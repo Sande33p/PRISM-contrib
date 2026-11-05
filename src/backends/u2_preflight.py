@@ -122,6 +122,7 @@ class U2PreflightReport:
     metadata_complete: bool
     execution_qualified: Literal[False] = False
     execution_requirements: tuple[str, ...] = EXECUTION_REQUIREMENTS
+    tokenizer_vocab_size: int | None = None
 
     def require_metadata(self) -> None:
         """Raise with actionable failures; success still does not qualify execution."""
@@ -132,9 +133,12 @@ class U2PreflightReport:
 def _local(root: Path, name: str) -> Path:
     if not name or "\\" in name or Path(name).is_absolute() or ".." in Path(name).parts:
         raise ValueError(f"unsafe relative path: {name!r}")
-    result = (root / name).resolve()
+    candidate = root / name
+    result = candidate.resolve()
     if not result.is_relative_to(root):
         raise ValueError(f"path escapes artifact root: {name!r}")
+    if any(part.is_symlink() for part in (candidate, *candidate.parents)):
+        raise ValueError(f"symlink input: {name!r}")
     return result
 
 
@@ -189,6 +193,8 @@ def preflight_u2(
     source_root: Path | str,
     checkpoint_root: Path | str,
     requirements: U2PreflightRequirements,
+    *,
+    source_manifest: Path | str | None = None,
 ) -> U2PreflightReport:
     """Inspect local regular files and installed distribution metadata only.
 
@@ -197,6 +203,9 @@ def preflight_u2(
     hashing, never deserialized; no filesystem writes or network operations occur.
     Only indexed safetensors and JSON tokenizers are supported by this inspector.
     """
+    for root in (Path(source_root), Path(checkpoint_root)):
+        if any(part.is_symlink() for part in (root, *root.parents)):
+            raise ValueError("symlink artifact root")
     source = Path(source_root).resolve()
     checkpoint = Path(checkpoint_root).resolve()
     files: list[FileEvidence] = []
@@ -260,7 +269,11 @@ def preflight_u2(
             return None
 
     expected_hashes = requirements.artifact_hashes or {}
-    manifest = inspect("source", "source-manifest.json")
+    manifest = (
+        inspect("source", "source-manifest.json")
+        if source_manifest is None
+        else _local(Path(source_manifest).absolute().parent, Path(source_manifest).name)
+    )
     source_start = len(incompatible)
     if manifest is not None:
         try:
@@ -326,6 +339,7 @@ def preflight_u2(
         or token_digest != requirements.tokenizer_digest
     ):
         incompatible.append("tokenizer digest missing or incompatible with expected identity")
+    tokenizer_vocab: int | None = None
     if tokenizer is not None:
         try:
             model = _object(tokenizer.get("model"), "tokenizer.model")
@@ -346,6 +360,7 @@ def preflight_u2(
                     raise ValueError(f"token ID outside configured vocabulary: {token}")
             if len(set(tokens.values())) != len(tokens):
                 raise ValueError("duplicate tokenizer IDs")
+            tokenizer_vocab = len(tokens)
             for token, expected_id in SPECIAL_TOKEN_IDS.items():
                 if tokens.get(token) != expected_id:
                     raise ValueError(
@@ -413,4 +428,5 @@ def preflight_u2(
         split,
         tuple(versions),
         not missing and not incompatible,
+        tokenizer_vocab_size=tokenizer_vocab,
     )

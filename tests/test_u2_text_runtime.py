@@ -871,3 +871,26 @@ def test_cancellation_after_real_loop_before_finalization(report, monkeypatch, t
     assert_receipt(result, ids, ends, "cancelled", calls, positions)
     assert result.eoa_observed is (terminal == "eoa")
     assert_replay(adapter, model, req, result)
+
+
+@pytest.mark.parametrize("device", ["xpu:0", "xpu:7", "cuda:0", "cpu"])
+def test_indexed_device_admission_does_not_probe_availability(report, monkeypatch, device):
+    model = TinyModel(report)
+    model.spec = replace(model.spec, device=torch.device(device))
+    monkeypatch.setattr(
+        torch.cuda, "is_available", lambda: pytest.fail("metadata must not probe CUDA")
+    )
+    monkeypatch.setattr(
+        torch.xpu, "is_available", lambda: pytest.fail("metadata must not probe XPU")
+    )
+    runtime = U2TextRuntime(model, preflight=report)
+    assert runtime._spec.device == torch.device(device)
+    assert not model.calls
+
+
+@pytest.mark.parametrize("device", ["xpu", "cuda", "cpu:0", "meta"])
+def test_unindexed_accelerators_and_cpu_index_remain_rejected(report, device):
+    model = TinyModel(report)
+    model.spec = replace(model.spec, device=torch.device(device))
+    with pytest.raises(ValueError, match="device"):
+        U2TextRuntime(model, preflight=report)

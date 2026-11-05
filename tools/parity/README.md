@@ -89,8 +89,12 @@ parity verdict. Missing files are not manufactured; an incomplete collection is
 saved with CLI exit code 2. Invalid receipts/inputs fail without a collection.
 Generation and complete collection return 0; usage/validation errors return 2.
 
-Independent Evaluation must inspect the private, exact-revision source/asset
-identities, observed runtime/job identity, traces, numerical comparisons and
+Before admitted execution, independent Harness review checks the exact code
+revision and Evaluation freezes its criteria. Mac-owned SSH/PBS transport is
+independent of the unresolved remote Codex sandbox; no sandbox bypass is needed
+or authorized. After execution, independent Evaluation must inspect the private,
+exact-revision source/asset identities, observed runtime/job identity, traces,
+numerical comparisons and
 terminal semantics against its previously frozen criteria. No successful verdict
 can be inferred from an author-supplied status or the public transport summary.
 

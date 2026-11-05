@@ -127,9 +127,11 @@ bytes from becoming public artifacts. Sanitized summaries cannot establish parit
 Before future submission the operator must freeze the actual allocation,
 concurrency, nodes/accelerators, walltime, total node/accelerator hours, storage
 allowance, retry limit and permitted commands; verify staged source/assets and
-the complete environment; obtain Integration implementation plus independent
-Harness/Evaluation review; and resolve the recorded remote sandbox limitation
-through an approved environment. No bypass is part of this launcher. The operator
+the complete environment; obtain Integration implementation and independent
+exact-revision Harness code review with Evaluation criteria frozen before execution.
+Evaluation applies those criteria to actual Aurora evidence afterward. Mac-owned
+SSH/PBS transport works independently of the unresolved remote Codex sandbox
+limitation; it does not bypass or disable that sandbox. The operator
 owns submission, job-ID recording, monitoring, retention and cleanup. Reusing an
 output directory or automatically retrying an ambiguous submission is unsupported.
 Rollback before submission is removal of only the operator's new plan directory;
