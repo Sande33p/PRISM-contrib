@@ -5,8 +5,10 @@ injected-runtime boundary for text-reference experiments. The implementation
 validates token requests, collects committed output and instrumented work,
 and retains terminal receipts for replay within one adapter instance.
 
-This is an offline-tested protocol, not a production U2 driver. It contains
-no model loader, tokenizer renderer, weights or upstream sampler. The global
+`src.backends.u2_text_runtime.U2TextRuntime` now implements the pinned greedy
+text loop with an explicitly supplied local model. The renderer and metadata
+preflight are separate, dependency-free modules. No loader or weights are
+provided, and checkpoint-backed execution remains unqualified. The global
 `u2_reference` and `u2_native` selectors remain planned and raise
 `NotImplementedError`; selecting them in `ModelConfig` does not activate this
 adapter. Existing local/HF model construction, checkpoint keys and chat
@@ -31,7 +33,7 @@ Output/call/block/step limits must each be positive integers no greater than
 128. Booleans, numeric strings, unsupported versions and malformed IDs are
 rejected rather than coerced. These admission limits are not a model context
 window, hardware-fit measurement or speed claim. The protocol passes sampler
-settings to the driver; it does not implement their numerical semantics.
+settings to the driver; the concrete U2 loop below defines their semantics.
 
 `RuntimeIdentity` declares `runtime_id`, `source_revision`, `tokenizer_digest`,
 `vocab_size`, `eoa_token_id` and `mask_token_id`. The adapter snapshots this
@@ -134,9 +136,9 @@ adapter = U2ReferenceAdapter(runtime)
 app = create_app(reference_adapter=adapter, load_legacy_model_on_startup=False)
 ```
 
-The snippet illustrates dependency injection; this repository does not ship
-the `runtime` driver. `create_app()` and the default module-level application
-retain legacy model startup. Offline tests disable that startup explicitly
+The snippet illustrates dependency injection; `runtime` can be a separately
+constructed `U2TextRuntime` as described below. `create_app()` and the default
+module-level application retain legacy model startup. Offline tests disable that startup explicitly
 and inject deterministic fixtures. The adapter modules need only the Python
 standard library; importing the existing API server still needs its normal
 serving/platform dependencies.
@@ -154,12 +156,148 @@ explicit adapter operation in this slice. A disconnected client must not
 assume computation stopped. A later request with the same ID/payload can
 retrieve a retained terminal receipt from the same adapter instance.
 
+## Renderer and tokenizer artifact identity
+
+`render_text_prompt(tokenizer, system_prompt=..., user_text=...,
+tokenizer_artifacts=...)` renders exactly
+`<system>{system_prompt}</system><user>{user_text}</user>`. It preserves
+whitespace, Unicode, explicit empty text and the pinned tokenizer call:
+`truncation=True, max_length=4096, padding=False`. Truncation can remove the
+closing user tag. Reserved markers, media/history inputs, malformed IDs and
+incompatible special-token encodings fail. There is no implicit HF chat
+template, default system text, answer prefix or invented think-token mapping.
+The immutable result supplies `prompt_ids`, `tokenizer_digest` and
+`renderer_revision`. Pass its prefix and digest directly to `TextRequest`;
+the prefix excludes BOA. Text decoding is outside the driver.
+
+Both renderer and preflight use `u2_text_renderer.tokenizer_digest`:
+
+1. Supply nonempty exact bytes for `tokenizer.json` and
+   `tokenizer_config.json`, plus any present `special_tokens_map.json` and
+   `added_tokens.json`. These four basenames are the admitted set; the renderer
+   rejects unknown names instead of omitting supplied bytes.
+2. Compute each raw file's lowercase bare SHA256, sort `(filename, file_hash)`
+   pairs, then serialize with `json.dumps(pairs, ensure_ascii=True,
+   separators=(",", ":")).encode()`.
+3. Return `"sha256:" + SHA256(b"u2-tokenizer-artifacts-v1\0" + serialized).hexdigest()`.
+
+Ordering is irrelevant; file names, contents, configuration and optional files
+affect identity. Preflight's earlier bare aggregate identity is incompatible:
+reinspect the same snapshot and use the prefixed identity in all three
+components. Per-file `FileEvidence.sha256` and requirement `artifact_hashes`
+remain bare 64-hex SHA256. Both boundaries validate the complete pinned
+17-token contract. The renderer also checks atomic encoding.
+
+`preflight_u2(source_root, checkpoint_root, requirements)` inspects local
+metadata and hashes without importing checkpoint Python or loading tensors.
+Unsafe paths/escaping symlinks, empty files, malformed JSON, incorrect source
+hashes, missing shards and incompatible token/config/layout identities fail
+metadata admission. Tokenizer bytes are bounded to 64 MiB per file and checked
+against their just-observed file hash. Use a stable local snapshot; concurrent
+file or object mutation is not supported. The original six-entry source
+manifest remains separate from the supplemental source manifest.
+
+`report.require_metadata()` does not qualify model execution:
+`execution_qualified` remains `False`, and `split_candidate` describes index
+keys only. A matching digest does not prove that an injected tokenizer or
+model was built from those bytes. The caller owns that binding, strict tensor
+key/shape/dtype validation, split-layout verification and later model parity.
+
+## Explicit local model and source-backed loop
+
+The source pin is InternLM/InternLumina-U2
+`70f21c1df8fa26e514df26ba31bc061be8d3d018`. The loop and text metadata mask are
+adapted from its Apache-2.0
+[text generator](https://github.com/InternLM/InternLumina-U2/blob/70f21c1df8fa26e514df26ba31bc061be8d3d018/generators/text_understanding_generator.py)
+and [sampling helpers](https://github.com/InternLM/InternLumina-U2/blob/70f21c1df8fa26e514df26ba31bc061be8d3d018/utils/generation_utils.py).
+The pinned media-layout helper defines eight replicated channels; the model's
+`infer_mmu` branch returns a tensor for noisy type-3 rows directly.
+
+```python
+from src.backends.u2_reference import U2ReferenceAdapter
+from src.backends.u2_text_runtime import U2TextRuntime
+
+# Explicit, caller-supplied LocalTextModel and inspected U2PreflightReport.
+runtime = U2TextRuntime(local_model, preflight=preflight_report)
+adapter = U2ReferenceAdapter(runtime)
+result = adapter.generate(request)
+```
+
+The local model implements `LocalTextModel`: an immutable `LocalModelSpec`,
+`training`, `eval()` and a callable matching the pinned forward signature.
+`LocalModelSpec` declares `RuntimeIdentity`, the full special-token map,
+`torch.dtype`, `torch.device`, `max_position_embeddings`, `num_codebooks=8`
+and `layout="split"`. Construction checks these declarations against the
+preflight report and calls `eval()`; every forward runs in Torch inference
+mode. Subsequent declaration changes or training mode fail. These checks
+cannot detect a dishonest binding or all internal model mutations. Synthetic
+models must be explicitly identified in `runtime_id`; they are never a fallback.
+
+Supported declared dtypes are float32, float16 and bfloat16. CPU devices must
+be unindexed; CUDA declarations must specify an explicit index. Other devices
+are rejected. Only synthetic CPU execution has been tested; allowing a CUDA
+declaration is not accelerator qualification or execution authorization.
+
+Each request reserves `P + 1 + max_new_tokens` against inspected capacity.
+The extra position is exactly one BOA `157165`; EOA is `157166` and mask is
+`156895`. A token-level prefix already containing BOA, EOA or mask fails
+before a forward. Every generated ID other than terminal EOA is preserved,
+including other specials; an unresolved mask rejects the entire pending block.
+
+For current sequence length L, each actual forward is independently invoked
+through `control.run_model_call(L, operation)`:
+
+```python
+model(input_ids, type_position_ids, attention_mask=mask, infer_mmu=True,
+      is_clean=is_clean, position_ids=positions)
+```
+
+Inputs are integer `[1,L,8]`, with each token replicated across channels.
+Types, clean flags and positions are integer `[1,L]`. The additive attention
+mask is `[1,1,L,L]` in the model dtype: zero permits visibility and
+`torch.finfo(dtype).min` denies it. Context is type 1/turn 0/block -1/clean 1;
+BOA is type 1/turn 1/block 0/clean 0. Generated positions have type 3/turn 1,
+block `j // block_size`, and positions `P+1+j`. Previous blocks become clean;
+the entire current block stays noisy even after individual reveals. BOA stays
+noisy. No future block or KV-cache shortcut is used.
+
+The model must return dense finite logits `[current_block_length,vocab_size]`
+for all noisy type-3 rows, including revealed rows, on the declared device and
+dtype. HF objects, tuples, wrong shapes/devices/dtypes and nonfinite values
+fail explicitly. Validation follows the instrumented return, so invalid
+returned logits still count that operation's L positions. A raising operation
+counts its start but contributes no completed-operation positions; errors
+leave aggregate totals unknown.
+
+Sampling is fixed at temperature zero, cfg zero and low-confidence revealing.
+Candidate IDs use raw-logit argmax; reveal confidence is gathered softmax
+probability computed in float64. Revealed tokens never change. Ties use Torch
+argmax/topk on the executing runtime, with no portable tied-index ordering
+promise. For block length n and t steps, quotas are `n//t + 1` for the first
+`n%t` steps and `n//t` thereafter. All t forwards execute, even with zero quota.
+The last short block uses its actual length. The recorded seed does not cause
+random draws or global RNG changes in this greedy loop.
+
+EOA is checked only after the complete block schedule. The driver commits the
+prefix through the first EOA and returns `eoa`; control observes and strips
+it. Otherwise it commits the whole block. Budget/cancellation drops the
+pending block and keeps previous commits. Short output never substitutes for
+EOA evidence. The existing control owns stop/error precedence and replay.
+
 ## Verification boundary
 
-Offline tests use fixture runtimes to exercise admission, commits, terminal
-evidence, actual instrumented operation counts, failure accounting,
-cancellation, concurrent duplicate requests, replay and legacy-route
-retention. Fixture identities and simulated operations are not model
-execution or artifact verification. A real U2 driver, exact tokenizer/prompt
-rendering, direct-upstream parity, durable receipts and transport cancellation
-remain separate implementation and qualification work.
+`tests/test_u2_text_runtime.py` runs this actual loop through
+`U2ReferenceAdapter`, with synthetic logits and literal masks, trajectories,
+quotas, commits, EOA and usage expectations frozen before implementation.
+It covers cancellation with synchronization events, invalid outputs, call
+caps, request admission, replay and bounded ledger behavior. Renderer and
+preflight tests use tiny local artifact snapshots, including a cross-component
+identity regression. Existing adapter/API/global-selector tests remain
+regression checks for the unchanged interfaces.
+
+This is deterministic loop/contract evidence. No checkpoint or actual tokenizer
+assets were loaded, and no real-model parity, quality, performance, memory-fit
+or accelerator result is established. Exact artifact-to-object binding,
+identical-checkpoint direct-upstream parity, durable receipts, transport
+cancellation, mid-kernel interruption and device-release guarantees remain
+separate qualification work. No global backend is enabled by these tests.
