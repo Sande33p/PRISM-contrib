@@ -1,0 +1,628 @@
+{
+  "schema_version": 1,
+  "contract_version": 1,
+  "protocol_id": "u2-aurora-text-parity-v1",
+  "evidence_level": "proposed",
+  "purpose": "Frozen checkpoint acceptance protocol; synthetic CPU examples are not checkpoint outputs or parity evidence.",
+  "source_revision": "70f21c1df8fa26e514df26ba31bc061be8d3d018",
+  "source_manifest": {
+    "infer_mmu_sft.py": "82779ccc3107ef2d604b1dff2765a7b4536eaf881665da66cfe6a29bf086cc35",
+    "generators/text_understanding_generator.py": "e9e9bc3d6f59c7baac3a740c37b4992de796c1f91dba7b1ef2a769d2befeec8a",
+    "utils/generation_utils.py": "bfe97c1dec4cbbd1cef1c52ea0d115655130cb7004305cc5eff8feeb7a7a5d76",
+    "utils/tokenizer_contract.py": "cf0890cb1dc0fc47e794bc350ca93fb8bb51a367eac2cf4bff02775893218916",
+    "LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "README.md": "a6906235946ff0d342f27fa8339d95598e47ca2031386ca22f412971539adc44"
+  },
+  "prism_base_commit": "2c0014595a987a169baa4496fec941f3d3c25b49",
+  "parent_contract": {
+    "sha256": "6c2363eea092d2f37ee546639a81e9c3419a28f9dc22b8fc72892fd2db6c49dc"
+  },
+  "checkpoint": {
+    "repository": "internlm/InternLumina-U2",
+    "revision": "8e3d57f3cb190323334752952a622bb5b97086c1",
+    "variant": "nvidia",
+    "operator_asset_manifest_sha256": "55e8b7538fbf3c7d88aa77a229a53dcf7eb6b3dde9287cfd39491349c6e78aad",
+    "local_weight_verification": false
+  },
+  "execution": {
+    "primary_dtype": "bfloat16",
+    "optional_dtypes": [
+      "float32",
+      "float16"
+    ],
+    "device": "explicit indexed xpu:N supplied by admitted launch",
+    "num_codebooks": 8,
+    "layout": "split",
+    "batch_size": 1,
+    "repetitions_per_case": 2,
+    "path_order": [
+      "oracle_then_prism",
+      "prism_then_oracle"
+    ],
+    "training": false,
+    "require_meta_mask": true,
+    "early_stop_token_ids": [
+      157166
+    ],
+    "answer_type_id": 3,
+    "mask_token_id": 156895,
+    "boa_token_id": 157165,
+    "max_prompt_tokens": 4096,
+    "append_boa_exactly_once": true,
+    "rng_reset_before_each_path": true,
+    "no_execution_authorized_by_fixture": true
+  },
+  "cases": [
+    {
+      "id": "normal_blocks",
+      "system_prompt": "Answer briefly.",
+      "user_text": "List the integers from one through twenty, separated by spaces.",
+      "settings": {
+        "temperature": 0.0,
+        "cfg_scale": 0.0,
+        "remasking": "low_confidence",
+        "seed": 1729,
+        "block_size": 4,
+        "steps_per_block": 4,
+        "max_new_tokens": 16,
+        "max_model_calls": 32
+      }
+    },
+    {
+      "id": "short_final_block",
+      "system_prompt": "Answer briefly.",
+      "user_text": "Write the letters of the alphabet separated by spaces.",
+      "settings": {
+        "temperature": 0.0,
+        "cfg_scale": 0.0,
+        "remasking": "low_confidence",
+        "seed": 1729,
+        "block_size": 4,
+        "steps_per_block": 3,
+        "max_new_tokens": 7,
+        "max_model_calls": 32
+      }
+    },
+    {
+      "id": "zero_transfer",
+      "system_prompt": "Answer briefly.",
+      "user_text": "Repeat the word amber.",
+      "settings": {
+        "temperature": 0.0,
+        "cfg_scale": 0.0,
+        "remasking": "low_confidence",
+        "seed": 1729,
+        "block_size": 4,
+        "steps_per_block": 5,
+        "max_new_tokens": 2,
+        "max_model_calls": 32
+      }
+    },
+    {
+      "id": "eoa_opportunity",
+      "system_prompt": "Return no words when asked to stop.",
+      "user_text": "Stop.",
+      "settings": {
+        "temperature": 0.0,
+        "cfg_scale": 0.0,
+        "remasking": "low_confidence",
+        "seed": 1729,
+        "block_size": 8,
+        "steps_per_block": 4,
+        "max_new_tokens": 32,
+        "max_model_calls": 32
+      }
+    },
+    {
+      "id": "verbatim_unicode",
+      "system_prompt": "Preserve the supplied text.",
+      "user_text": "  amber\tblue\nCafé λ  ",
+      "settings": {
+        "temperature": 0.0,
+        "cfg_scale": 0.0,
+        "remasking": "low_confidence",
+        "seed": 1729,
+        "block_size": 3,
+        "steps_per_block": 2,
+        "max_new_tokens": 5,
+        "max_model_calls": 32
+      }
+    },
+    {
+      "id": "empty_user",
+      "system_prompt": "",
+      "user_text": "",
+      "settings": {
+        "temperature": 0.0,
+        "cfg_scale": 0.0,
+        "remasking": "low_confidence",
+        "seed": 1729,
+        "block_size": 2,
+        "steps_per_block": 4,
+        "max_new_tokens": 3,
+        "max_model_calls": 32
+      }
+    }
+  ],
+  "coverage": {
+    "required_observed": [
+      "complete_normal_block",
+      "multiple_blocks",
+      "short_final_block",
+      "zero_transfer_forward",
+      "length_stop",
+      "eoa_stop"
+    ],
+    "missing_behavior_verdict": "incomplete",
+    "prompt_selection_after_results": false,
+    "forced_checkpoint_logits": false,
+    "note": "Prompts do not guarantee EOA or length. Retain missing coverage; no seed fishing, prompt substitution, fabricated outputs or threshold relaxation."
+  },
+  "required_identity_fields": [
+    "prism_commit",
+    "prism_tree",
+    "prism_tree_clean",
+    "oracle_revision",
+    "oracle_six_file_manifest",
+    "oracle_imported_code_manifest",
+    "oracle_instrumentation_diff_and_review",
+    "checkpoint_repository",
+    "checkpoint_revision",
+    "checkpoint_variant",
+    "checkpoint_shard_sha256s",
+    "checkpoint_index_sha256",
+    "checkpoint_config_sha256",
+    "checkpoint_bundled_code_sha256s",
+    "strict_load_key_shape_dtype_report",
+    "loaded_model_binding_provenance",
+    "tokenizer_digest",
+    "tokenizer_artifact_sha256s",
+    "tokenizer_binding_provenance",
+    "tokenizer_mutation_check",
+    "special_token_ids",
+    "renderer_revision",
+    "acceptance_sha256",
+    "acceptance_document_revision"
+  ],
+  "required_runtime_fields": [
+    "python_version",
+    "package_versions",
+    "device_type",
+    "device_index",
+    "device_identity",
+    "dtype",
+    "modules_in_order",
+    "attention_backend",
+    "deterministic_settings",
+    "seed_and_rng_state_hashes",
+    "platform",
+    "authorized_job_id",
+    "execution_allocation"
+  ],
+  "matching": {
+    "exact_between_paths": [
+      "device",
+      "runtime",
+      "loaded_weight_bytes",
+      "dtype",
+      "tokenizer_object_and_bytes",
+      "seed_and_initial_rng_state",
+      "sampler_settings",
+      "prefix_ids",
+      "prefix_metadata",
+      "attention_masks",
+      "generated_output_ids",
+      "committed_block_ends",
+      "stop_reason",
+      "eoa_location",
+      "forward_starts",
+      "forward_returns",
+      "processed_positions"
+    ],
+    "checkpoint_code_is_not_oracle_source": true,
+    "metadata_or_runtime_id_is_not_binding_proof": true,
+    "oracle_entrypoint": "generators.text_understanding_generator.generate_text_bd",
+    "oracle_requirement": "Execute actual pinned upstream function; disclose and review XPU/import/instrumentation changes. A rewritten sampler is not an oracle."
+  },
+  "result_envelope": {
+    "required_fields": [
+      "schema_version",
+      "evidence_level",
+      "complete",
+      "status",
+      "failure_reasons",
+      "identities",
+      "runtime",
+      "cases",
+      "artifacts"
+    ],
+    "status_values": [
+      "pass",
+      "fail",
+      "incomplete"
+    ],
+    "pass_evidence_level": "independently-validated",
+    "case_required_fields": [
+      "request",
+      "rendered_prefix",
+      "oracle",
+      "prism",
+      "discrete_comparisons",
+      "numeric_summaries",
+      "threshold_reference",
+      "coverage"
+    ],
+    "artifact_reference_fields": [
+      "relative_path",
+      "size_bytes",
+      "sha256"
+    ],
+    "private_raw_evidence": true
+  },
+  "trace_requirements": {
+    "event_key": [
+      "case_id",
+      "repetition",
+      "path",
+      "call_index"
+    ],
+    "forward_fields": [
+      "start_observed",
+      "return_observed",
+      "exception",
+      "block_index",
+      "step_index",
+      "sequence_length",
+      "processed_positions_on_return",
+      "input_ids",
+      "type_ids",
+      "turn_ids",
+      "block_ids",
+      "is_clean",
+      "position_ids",
+      "attention_mask",
+      "raw_logits",
+      "candidate_ids",
+      "candidate_confidence",
+      "transfer_quota",
+      "selected_absolute_indices",
+      "argmax_ties",
+      "selection_boundary_ties",
+      "near_tie_margins"
+    ],
+    "block_fields": [
+      "block_index",
+      "completed_block_ids",
+      "first_eoa_local_index",
+      "committed_output_ids",
+      "committed_block_ends"
+    ],
+    "terminal_fields": [
+      "finish_reason",
+      "error_code",
+      "eoa_observed",
+      "usage"
+    ],
+    "tensor_reference_fields": [
+      "relative_path",
+      "shape",
+      "dtype",
+      "byte_order",
+      "size_bytes",
+      "sha256"
+    ],
+    "observation_policy": "Independent hooks at actual forward entry and return; include zero-quota steps. No reconstruction from planned loop counts. Preserve partial starts and unknown totals after errors.",
+    "zero_quota_diagnostics": "Capture raw logits on every returned forward. Upstream computes candidates/confidence even at zero quota; if PRISM skips them, independently derive and label diagnostic-only values from captured logits without claiming runtime selection.",
+    "index_convention": "Zero-based absolute sequence indices include prefix and one BOA; compare reveal sets per block/step, not their internal order.",
+    "sidecars": "All current-block raw logits, including previously revealed rows and every vocabulary column, must remain available for numeric checks. Hash-only or sampled columns are insufficient. Validate shape, byte size, containment and content hash.",
+    "stop_semantics": "Check EOA after all scheduled steps of a completed block; exclude first EOA and trailing tokens from output. Preserve decoded block and EOA offset. Never commit a partial block."
+  },
+  "tie_policy": {
+    "reveal_comparison": "set_equality",
+    "duplicate_indices": "fail",
+    "argmax": "preserve actual upstream argmax; record exact maxima and winning token",
+    "selection": "preserve actual upstream topk; do not stabilize or sort before selecting",
+    "boundary": "Record kth and next eligible confidence plus all indices exactly tied at kth; null boundary margin when k=0 or k equals eligible count. Masked sentinel positions are ineligible.",
+    "near_tie": "gap <= atol + rtol * max(abs(left), abs(right)); use raw-logit thresholds for top-two token gaps and confidence thresholds for kth-boundary gaps",
+    "divergence_even_if_tied": "fail",
+    "near_tie_is_exception": false
+  },
+  "numeric_tolerances": {
+    "rule": "For every compared finite scalar, abs(prism - oracle) <= atol + rtol * abs(oracle); no averaging or percentage allowance.",
+    "comparison_precision": "Convert captured values to float64 for diagnostics; retain original dtype and bytes. Compare raw logits and pre-masking candidate probabilities from softmax(logits.to(float64)).",
+    "float32": {
+      "raw_logits": {
+        "atol": 1e-05,
+        "rtol": 1e-05
+      },
+      "candidate_confidence": {
+        "atol": 1e-06,
+        "rtol": 1e-05
+      }
+    },
+    "float16": {
+      "raw_logits": {
+        "atol": 0.002,
+        "rtol": 0.002
+      },
+      "candidate_confidence": {
+        "atol": 0.0002,
+        "rtol": 0.002
+      }
+    },
+    "bfloat16": {
+      "raw_logits": {
+        "atol": 0.02,
+        "rtol": 0.02
+      },
+      "candidate_confidence": {
+        "atol": 0.002,
+        "rtol": 0.02
+      }
+    },
+    "nonfinite_logits_or_diagnostics": "fail",
+    "structural_negative_infinity": "Only masked/ineligible confidence sentinels; exact matching locations required, excluded from finite numeric reductions.",
+    "required_summaries": [
+      "compared_scalar_count",
+      "max_absolute_error",
+      "max_relative_error_nonzero_oracle",
+      "max_normalized_error",
+      "violation_count",
+      "first_violation",
+      "minimum_argmax_margin",
+      "minimum_selection_boundary_margin",
+      "tie_count"
+    ],
+    "max_normalized_error": "max(abs(prism-oracle)/(atol+rtol*abs(oracle))) must be <= 1.",
+    "rationale": "Predeclared diagnostic bounds ordered by mantissa precision; they are ceilings, not observed accuracy. Exact discrete agreement remains mandatory. No calibration or relaxation after measurements."
+  },
+  "verdict": {
+    "pass": "All required cases and both repetitions satisfy identity, trace, numeric, discrete and coverage criteria in the primary dtype, with complete successful receipts and reviewed exact-revision evidence. Optional dtypes are separately labeled.",
+    "fail": "Any observed identity, discrete, nonfinite, numeric or repeatability violation; preserve first divergence and all failures.",
+    "incomplete": "Missing evidence or coverage, unavailable instrumentation, unsupported runtime, OOM, cancellation, budget exhaustion, execution error or missing exit/result receipt. Known violations remain failures even if evidence is also incomplete.",
+    "successful_finish_reasons": [
+      "eoa",
+      "length"
+    ],
+    "excluded_finish_reasons": [
+      "budget",
+      "cancelled",
+      "error"
+    ],
+    "aggregate_policy": "No majority vote or averaging away a failure; retain per-case/per-repetition/per-dtype verdicts.",
+    "uncertainty": "Two deterministic repeats detect instability only; no confidence interval, generalization, speed, quality or real-model claim from CPU fixtures.",
+    "amendment_policy": "New version and pre-result review; retain prior artifact hashes, failed evidence and original verdict."
+  },
+  "synthetic_cpu": {
+    "evidence_label": "synthetic-cpu-only",
+    "prompt_ids": [
+      41,
+      42
+    ],
+    "vocab_size": 157200,
+    "seed": 1729,
+    "loser_logit": -1000.0,
+    "competitor_id": 100,
+    "competitor_logit": 0.0,
+    "winner_logits": [
+      6.0,
+      4.0,
+      2.0
+    ],
+    "note": "Hand-specified terminal and receipt expectations for the existing CPU loop, never expected checkpoint text. No fake comparison driver.",
+    "cases": [
+      {
+        "id": "normal_short",
+        "max_new_tokens": 5,
+        "block_size": 3,
+        "steps_per_block": 2,
+        "max_model_calls": 32,
+        "winner_ids": [
+          101,
+          102,
+          103
+        ],
+        "expected": {
+          "output_ids": [
+            101,
+            102,
+            103,
+            101,
+            102
+          ],
+          "committed_block_ends": [
+            3,
+            5
+          ],
+          "finish_reason": "length",
+          "forward_sequence_lengths": [
+            6,
+            6,
+            8,
+            8
+          ],
+          "observed_model_calls": 4,
+          "observed_processed_positions": 28,
+          "usage_complete": true
+        }
+      },
+      {
+        "id": "zero_transfer",
+        "max_new_tokens": 2,
+        "block_size": 4,
+        "steps_per_block": 4,
+        "max_model_calls": 32,
+        "winner_ids": [
+          101,
+          102
+        ],
+        "expected": {
+          "output_ids": [
+            101,
+            102
+          ],
+          "committed_block_ends": [
+            2
+          ],
+          "finish_reason": "length",
+          "forward_sequence_lengths": [
+            5,
+            5,
+            5,
+            5
+          ],
+          "observed_model_calls": 4,
+          "observed_processed_positions": 20,
+          "usage_complete": true
+        }
+      },
+      {
+        "id": "eoa_middle",
+        "max_new_tokens": 5,
+        "block_size": 3,
+        "steps_per_block": 2,
+        "max_model_calls": 32,
+        "winner_ids": [
+          101,
+          157166,
+          103
+        ],
+        "expected": {
+          "output_ids": [
+            101
+          ],
+          "committed_block_ends": [
+            1
+          ],
+          "finish_reason": "eoa",
+          "forward_sequence_lengths": [
+            6,
+            6
+          ],
+          "observed_model_calls": 2,
+          "observed_processed_positions": 12,
+          "usage_complete": true
+        }
+      },
+      {
+        "id": "eoa_first",
+        "max_new_tokens": 5,
+        "block_size": 3,
+        "steps_per_block": 2,
+        "max_model_calls": 32,
+        "winner_ids": [
+          157166,
+          102,
+          103
+        ],
+        "expected": {
+          "output_ids": [],
+          "committed_block_ends": [],
+          "finish_reason": "eoa",
+          "forward_sequence_lengths": [
+            6,
+            6
+          ],
+          "observed_model_calls": 2,
+          "observed_processed_positions": 12,
+          "usage_complete": true
+        }
+      },
+      {
+        "id": "budget_partial",
+        "max_new_tokens": 5,
+        "block_size": 3,
+        "steps_per_block": 2,
+        "max_model_calls": 3,
+        "winner_ids": [
+          101,
+          102,
+          103
+        ],
+        "expected": {
+          "output_ids": [
+            101,
+            102,
+            103
+          ],
+          "committed_block_ends": [
+            3
+          ],
+          "finish_reason": "budget",
+          "forward_sequence_lengths": [
+            6,
+            6,
+            8
+          ],
+          "observed_model_calls": 3,
+          "observed_processed_positions": 20,
+          "usage_complete": true
+        }
+      },
+      {
+        "id": "error_partial",
+        "max_new_tokens": 5,
+        "block_size": 3,
+        "steps_per_block": 2,
+        "max_model_calls": 32,
+        "winner_ids": [
+          101,
+          102,
+          103
+        ],
+        "expected": {
+          "output_ids": [
+            101,
+            102,
+            103
+          ],
+          "committed_block_ends": [
+            3
+          ],
+          "finish_reason": "error",
+          "forward_sequence_lengths": [
+            6,
+            6,
+            8
+          ],
+          "observed_model_calls": 3,
+          "observed_processed_positions": 12,
+          "usage_complete": false
+        },
+        "raise_on_call": 3
+      },
+      {
+        "id": "cancel_partial",
+        "max_new_tokens": 5,
+        "block_size": 3,
+        "steps_per_block": 2,
+        "max_model_calls": 32,
+        "winner_ids": [
+          101,
+          102,
+          103
+        ],
+        "expected": {
+          "output_ids": [
+            101,
+            102,
+            103
+          ],
+          "committed_block_ends": [
+            3
+          ],
+          "finish_reason": "cancelled",
+          "forward_sequence_lengths": [
+            6,
+            6,
+            8
+          ],
+          "observed_model_calls": 3,
+          "observed_processed_positions": 20,
+          "usage_complete": true
+        },
+        "cancel_on_call": 3
+      }
+    ]
+  }
+}
