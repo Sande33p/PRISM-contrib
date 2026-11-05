@@ -16,8 +16,125 @@ Operational knowledge for running PRISM training on Aurora HPC: environment setu
 6. [Troubleshooting](#troubleshooting)
 7. [Issues Fixed (Operational)](#issues-fixed-operational)
 8. [Environment Variables Reference](#environment-variables-reference)
+9. [U2 text parity preparation](#u2-text-parity-preparation)
 
 ---
+
+## U2 text parity preparation
+
+`tools/launch_aurora_u2_parity.py` generates an inference-only PBS script and
+`launch-plan.json`. It does **not** execute, submit, connect to Aurora, install
+packages, download assets, or import model libraries. `--dry-run` is the default
+and only generation mode; execution/submission options are rejected. This path
+is separate from the training recipes below. The deferred comparison entry point
+is `tools/parity/u2_text.py`, owned by Integration and absent from the prerequisite
+base. Generating a command for it does not qualify execution or activate global
+U2 selectors.
+
+Supply literal absolute paths, exact identity-file SHA256s, and an exact declared
+PRISM commit. The example uses caller-provided site variables; none are defaults.
+`PRISM_PLAN_DIR` must be a new directory with an existing parent on the machine
+generating the plan. `PRISM_OUTPUT_DIR` is a different, new directory on the
+eventual execution filesystem, with its parent provisioned by the operator.
+Input, output and plan areas must be disjoint. On macOS, use canonical local
+paths (for example, resolve the temporary directory's symlink first).
+At execution, every input/output path, including all ancestor components, must
+be free of symlinks. The script checks this before output creation, redirection
+or module setup; rejection leaves no runtime output or exit receipt. Use stable,
+operator-controlled parent directories: these checks do not protect against
+concurrent replacement of ancestors by another writer.
+
+```bash
+python tools/launch_aurora_u2_parity.py --dry-run \
+  --prism-root "${PRISM_REMOTE_ROOT:?}" --prism-revision "${PRISM_COMMIT:?}" \
+  --source-root "${PRISM_U2_SOURCE_ROOT:?}" \
+  --checkpoint-root "${PRISM_U2_CHECKPOINT_ROOT:?}" \
+  --output-dir "${PRISM_OUTPUT_DIR:?}" --plan-dir "${PRISM_PLAN_DIR:?}" \
+  --acceptance-file "${PRISM_ACCEPTANCE_FILE:?}" \
+  --acceptance-file-sha256 "${PRISM_ACCEPTANCE_SHA256:?}" \
+  --asset-manifest "${PRISM_ASSET_MANIFEST:?}" \
+  --asset-manifest-sha256 "${PRISM_ASSET_MANIFEST_SHA256:?}" \
+  --source-manifest "${PRISM_SOURCE_MANIFEST:?}" \
+  --source-manifest-sha256 "${PRISM_SOURCE_MANIFEST_SHA256:?}" \
+  --account "${PRISM_ACCOUNT:?}" --queue debug --nodes 1 --walltime 00:05:00 \
+  --filesystems "${PRISM_FILESYSTEMS:?}" --device xpu:0 --dtype bfloat16 \
+  --python "${PRISM_SITE_PYTHON:?}" --module-use "${PRISM_MODULE_PATH:?}" \
+  --module oneapi/release/2025.3.1 \
+  --module mpich/prd/5.0.0.aurora_test.51a9474 \
+  --module frameworks/2025.3.1
+```
+
+The generated environment setup always runs `module purge`, every explicit
+`--module-use` directory in order, then each `--module` in order. The supplied
+operator readiness record observed the matching compiler/MPI/framework sequence
+above; incomplete/default module hierarchies failed. The search directory and
+Python path must come from the site's reviewed configuration. The metadata
+readback observed Python 3.12.12, Torch 2.10.0a0+git449b176, Transformers 4.57.6
+and Safetensors 0.7.0; it did not import Torch, run XPU, establish model fit or
+qualify this comparison. Preserve the site's accelerator-aware Torch. This
+launcher does no dependency resolution or environment installation.
+
+The debug validation profile admits only 1–2 nodes and 00:05:00–01:00:00,
+inclusive. Those bounds cannot be overridden. Another queue requires explicit
+`--max-nodes`, `--min-walltime` and `--max-walltime`; these declarations are bounds,
+not an allocation. `--device` requires `xpu:N` with a nonnegative index; physical
+device existence is unverified. Dtypes are `float32`, `float16` and `bfloat16`.
+The script requires `PBS_JOBID` and a readable, nonempty `PBS_NODEFILE` before
+creating output. After module setup and input checks, it starts **one comparison
+process** using `mpiexec -n 1 --ppn 1` for placement on allocated compute nodes.
+The explicit `xpu:N` argument is preserved. Requesting two nodes still launches
+only one rank; it does not implement sharding or establish memory fit. PBS
+environment checks are refusal guards, not independent proof of a live job;
+the operator must use a real allocation and retain observed placement evidence.
+
+Dry-run permits Aurora-only paths that are absent locally and labels their
+identity hashes `declared_remote_unverified`. Remote existence and path safety
+remain unverified until execution-site checks. `--validate-local-inputs` additionally
+checks the three input directories and bounded JSON identity files against the
+supplied hashes. It does not inspect checkpoint shards, import upstream code,
+validate tokenizer binding, or interpret Evaluation's criteria. PRISM revision
+and the pinned oracle revision remain declarations until the future runner
+independently verifies loaded source and assets. Keep the exact six-entry pinned
+source manifest, full imported-code manifest and independent checkpoint identity
+distinct. Sampler settings and prompts come solely from the acceptance file.
+
+Plans and scripts contain private paths and must stay in the admitted private
+area. The plan records the exact runner argv/cwd and MPI execution argv, ordered
+module setup, declared identities, resource bounds, deterministic launch identity, script bytes/SHA256,
+`submitted=false` and `job_id=null`. It never creates runtime result receipts.
+New plan files are mode 0600 inside a mode 0700 directory; collisions fail.
+
+On separately authorized execution, the script requires a fresh output directory,
+captures separate `stdout.log` and `stderr.log`, and traps ordinary command/module
+failures to write `exit-status.json` with the actual exit code and launch identity.
+It verifies identity-file hashes and the runner's presence before invoking it.
+Known service credentials are unset, Hugging Face offline modes are enabled, and
+no environment dump is saved. The runner must still enforce local-only loading.
+Fixed PBS stdout/stderr filenames retain early setup errors separately. They do
+not validate the eventual submission directory: the operator must verify a
+private, canonical, symlink-free plan/submission location outside every input
+and runtime output tree, with fresh spool filenames. PBS can open these files
+before any script guard runs. Moving the plan requires this check again; no
+submission feature or automatic safety certification is provided. Failures
+before the output directory exists, hard scheduler kills, or storage failures can
+prevent an exit receipt; missing evidence is incomplete, never success.
+
+For sanitized collection, see [the parity transport guide](../../tools/parity/README.md#u2-text-parity-transport).
+Raw outputs remain private and unchanged. The collector's allowlist and lossy
+summaries prevent arbitrary logs, prompts, private paths, credentials or asset
+bytes from becoming public artifacts. Sanitized summaries cannot establish parity.
+
+Before future submission the operator must freeze the actual allocation,
+concurrency, nodes/accelerators, walltime, total node/accelerator hours, storage
+allowance, retry limit and permitted commands; verify staged source/assets and
+the complete environment; obtain Integration implementation plus independent
+Harness/Evaluation review; and resolve the recorded remote sandbox limitation
+through an approved environment. No bypass is part of this launcher. The operator
+owns submission, job-ID recording, monitoring, retention and cleanup. Reusing an
+output directory or automatically retrying an ambiguous submission is unsupported.
+Rollback before submission is removal of only the operator's new plan directory;
+after execution, retain raw evidence until independent review and delete only
+that run's admitted output/collection areas according to the retention decision.
 
 ## Quick Start: Interactive Session
 
