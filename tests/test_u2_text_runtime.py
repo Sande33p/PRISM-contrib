@@ -894,3 +894,24 @@ def test_unindexed_accelerators_and_cpu_index_remain_rejected(report, device):
     model.spec = replace(model.spec, device=torch.device(device))
     with pytest.raises(ValueError, match="device"):
         U2TextRuntime(model, preflight=report)
+
+
+@pytest.mark.parametrize("token", [157176, 157177, 157183])
+def test_strict_prompt_domain_is_distinct_from_full_output_domain(report, token):
+    report = replace(report, vocab_size=157184, tokenizer_vocab_size=157177)
+    model = TinyModel(report)
+    model.spec = replace(model.spec, prompt_vocab_size=157177)
+    runtime = U2TextRuntime(model, preflight=report)
+    control = ExecutionControl(
+        request(report.tokenizer_digest, prompt_ids=(token,)), runtime.identity, threading.Event()
+    )
+    if token >= 157177:
+        with pytest.raises(ValueError, match="bound tokenizer"):
+            runtime.generate(request(report.tokenizer_digest, prompt_ids=(token,)), control)
+        assert model.calls == []
+    else:
+        # A control that stops before a forward proves prompt admission only.
+        control.check_can_continue = lambda: (_ for _ in ()).throw(RuntimeError("admitted"))
+        with pytest.raises(RuntimeError, match="admitted"):
+            runtime.generate(request(report.tokenizer_digest, prompt_ids=(token,)), control)
+    assert runtime.identity.vocab_size == 157184

@@ -98,6 +98,14 @@ independently verifies loaded source and assets. Keep the exact six-entry pinned
 source manifest, full imported-code manifest and independent checkpoint identity
 distinct. Sampler settings and prompts come solely from the acceptance file.
 
+Pass optional `--run-context /absolute/private/context.json` to transport the
+runner's reviewed acceptance/instrumentation identities, module order, allocation
+evidence and full source-manifest identity. It receives the same path-containment
+and quoting checks; `--validate-local-inputs` also validates its bounded JSON object
+and binds its hash in the generated script. Keep this context and the generated
+plan private. The runner corroborates `PBS_JOBID` and `LOADEDMODULES`; absent evidence
+is incomplete and mismatches fail. This metadata never authorizes a submission.
+
 Plans and scripts contain private paths and must stay in the admitted private
 area. The plan records the exact runner argv/cwd and MPI execution argv, ordered
 module setup, declared identities, resource bounds, deterministic launch identity, script bytes/SHA256,

@@ -16,7 +16,7 @@ The historical training scripts below assume:
 ## U2 text parity transport
 
 The independent U2 prerequisite uses `tools/launch_aurora_u2_parity.py` and the
-deferred Integration entry point `tools/parity/u2_text.py`. It does not use the
+Integration entry point `tools/parity/u2_text.py`. It does not use the
 training scripts or generic token-embedding path. See the
 [Aurora preparation guide](../../docs/platforms/aurora_operations.md#u2-text-parity-preparation)
 for required launcher options, module purge/use/load ordering and execution gates.
@@ -38,6 +38,14 @@ PRISM root is its working directory. Exact manifest hashes are checked again by
 the script before the runner; verifying their semantics and actual source/model
 binding remains Integration's responsibility. The launcher never invents sampler
 defaults, expected outputs or Evaluation's numerical thresholds.
+
+An optional `--run-context /absolute/private/context.json` is forwarded unchanged
+to the runner. It carries reviewed acceptance/instrumentation identities, ordered
+modules, allocation evidence and the complete source-manifest identity. With
+`--validate-local-inputs`, the launcher validates its bounded JSON object and records
+its SHA256 for the script to recheck. Paths/content remain private; sanitized
+collection omits them. Missing context or observed PBS/module evidence is incomplete;
+declared/observed mismatches fail. Context does not grant execution authority.
 
 The generated script refuses execution without PBS allocation metadata and a
 readable, nonempty node file. It rejects symlink components in all input/output

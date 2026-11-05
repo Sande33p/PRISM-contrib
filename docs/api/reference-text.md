@@ -375,13 +375,24 @@ unsafe and symlink inputs fail closed.
 
 The loader validates the complete index and safetensors headers, split experts,
 eight channels, every constructed state key, shape and dtype, and read-back tensor
-bytes. No partial/random fallback or implicit dtype conversion is admitted.
+bytes. Each shard is read into a bounded owned byte buffer, verified against its
+admitted size/SHA256, then deserialized from that same immutable buffer. A pathname
+swap cannot substitute unverified parameter bytes. Peak host storage includes the
+model, the largest serialized shard (approximately 5 GB), deserializer tensors and
+per-tensor hashing copies; production memory fit is unmeasured. Allocation failures
+propagate without returning a partial model. No implicit dtype conversion is admitted.
 Checkpoint-bundled Python is verified as an artifact but is never imported as the
 pinned Git oracle. The six-entry preflight manifest remains separate from the
 complete source/imported-module manifest. The optional `source_manifest` keyword
 on `preflight_u2` permits a separate six-entry file without copying it into the
-source checkout. Inputs and their ancestors must be stable during a run; these
-checks do not provide a filesystem sandbox against concurrent replacement.
+source checkout. Inputs and their ancestors must be operator-controlled during a
+run; integrity checks are not a filesystem sandbox.
+
+The bound model checks parameters, all buffers (including nonpersistent rotary
+state), module registration, execution attributes, callable identities/code/defaults,
+partial arguments, class helpers, hooks and configuration. Full byte checks bracket
+comparison paths. Ordinary mutation fails before another forward; arbitrary hostile
+in-process Python and concurrent mutation are outside this boundary.
 
 `U2PreflightReport.vocab_size` and `RuntimeIdentity.vocab_size` describe the model
 logit domain. `tokenizer_vocab_size` records serialized tokenizer cardinality;
@@ -391,6 +402,11 @@ additional positions are not established padding. Strict loading and observed
 output shapes are separate qualification steps. All logits and selected IDs are
 preserved. Selecting a position absent from the tokenizer produces an explicit
 incomplete decoding result, never invented IDs or hidden logit masking.
+The strict loader sets `LocalModelSpec.prompt_vocab_size` from its actual bound
+tokenizer and checks it against preflight. External prompt IDs must be below that
+limit before the first forward. This optional field defaults to `None` for existing
+injected CPU/CUDA fixtures, preserving their declared model-domain admission.
+It never restricts generated IDs or the 157184-column output domain.
 
 `tools/parity/u2_text.py` accepts the inherited launcher's `--source-root`,
 `--checkpoint-root`, `--output-dir`, `--acceptance-file`, `--asset-manifest`,
@@ -401,8 +417,11 @@ private JSON containing `acceptance_document_revision`,
 `imported_source_manifest_sha256`. Supply reviewed evidence and original trust
 identities; these fields do not grant execution authority. The runner corroborates
 job identity and ordered loaded modules with `PBS_JOBID` and `LOADEDMODULES`.
-Missing context or observations stay incomplete; mismatches fail. The launcher does not yet transport this optional input; the operator
-must arrange concrete transport after exact-revision review.
+Missing context or observations stay incomplete; mismatches fail. The dry-run
+launcher forwards the optional `--run-context` path with the same shell quoting and
+input/output separation checks as other inputs. Local validation records its hash;
+the emitted script checks that hash when available. Raw context and paths stay in
+private plans/results and are omitted from sanitized collection.
 
 The comparison invokes actual pinned `generate_text_bd`, sharing the bound model,
 tokenizer, device/dtype and frozen settings with PRISM. Read-only tracing observes
@@ -413,12 +432,21 @@ missing EOA/length coverage remain visible. Numeric summaries use the frozen
 per-scalar thresholds. Raw comparison status is distinct from independent
 Evaluation acceptance; the driver never emits `independently-validated`.
 
-**Current execution limitation:** the pinned model imports VeOmni grouped GEMM
-through an eager chain whose `@pretuned` configuration queries CUDA capability;
-missing Triton can fail earlier. This revision installs no import adaptation and
-refuses XPU model loading before checkpoint execution, reporting the exact chain.
-The actual generator can be exercised with synthetic CPU tensors independently
-of model import. A disclosed, reviewed import adaptation and real runtime,
-tokenizer, checkpoint, memory-fit and output-shape qualification remain pending.
+**Restricted import profile:** `split-only-v1` replaces exactly the two pinned
+imports of `fused_moe_forward` and `get_parallel_state` with explicit unsupported
+guards. Only the excluded packed expert branch calls these symbols. The original
+model bytes and every computation body remain unchanged; original and compiled
+SHA256s plus the exact import replacement are recorded. The actual split/eight-channel
+configuration and constructed experts are checked. Genuine VeOmni utilities,
+logging, Torch, Transformers and tokenbridge/timm components remain in use. Optional
+`veomni_patch` and Liger packages on the effective path or already loaded are rejected
+before relevant imports; stale pyc files never supply pinned code.
+
+A tiny pinned-source synthetic-weight CPU test exercises genuine model construction,
+strict loading and BF16 forward using an existing timm 1.0.22 environment. This is
+source-path evidence only. Genuine timm is missing from the recorded Aurora runtime;
+dependency preparation is separately authorized work, and no substitute is supplied.
+Actual XPU execution, real tokenizer/checkpoint binding, memory fit and independent
+exact-revision adaptation review remain pending.
 The pinned loader's BF16/SDPA semantics are retained; optional diagnostic dtype
 conversion is not implemented. Global U2 selectors remain unavailable.

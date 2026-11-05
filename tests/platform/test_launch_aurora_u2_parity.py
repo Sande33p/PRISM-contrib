@@ -730,3 +730,77 @@ def test_local_input_symlink_is_rejected(setup):
     with pytest.raises(SystemExit):
         launcher.main(setup["args"] + ["--validate-local-inputs"])
     assert not setup["plan"].exists()
+
+
+def test_private_context_quoted_path_reaches_actual_runner_argv(setup):
+    context = setup["root"] / "private ' ; $(touch CONTEXT_INJECTION).json"
+    context.write_text(json.dumps({"private": "synthetic-secret-not-for-summary"}))
+    result = plan(setup, ["--run-context", str(context), "--validate-local-inputs"])
+    assert result["argv"][-2:] == ["--run-context", str(context)]
+    assert (
+        result["private_run_context"]["sha256"] == hashlib.sha256(context.read_bytes()).hexdigest()
+    )
+    assert b"synthetic-secret-not-for-summary" not in (setup["plan"] / "job.sh").read_bytes()
+    execution = fake_run(setup)
+    assert execution.returncode == 0, execution.stderr
+    actual = json.loads((setup["paths"]["output-dir"] / "argv.json").read_text())
+    assert actual[-2:] == ["--run-context", str(context)]
+    assert not (setup["root"] / "CONTEXT_INJECTION").exists()
+
+
+@pytest.mark.parametrize("payload", ["[]", "null", "not json", '{"x":NaN}'])
+def test_invalid_local_private_context_is_rejected(setup, payload):
+    context = setup["root"] / "context.json"
+    context.write_text(payload)
+    with pytest.raises(SystemExit):
+        launcher.main(setup["args"] + ["--run-context", str(context), "--validate-local-inputs"])
+    assert not setup["plan"].exists()
+
+
+@pytest.mark.parametrize("location", ["output", "plan", "traversal", "symlink", "missing"])
+def test_private_context_path_safety(setup, location):
+    context = setup["root"] / "context.json"
+    context.write_text("{}")
+    if location == "output":
+        context = setup["paths"]["output-dir"] / "context.json"
+    elif location == "plan":
+        context = setup["plan"] / "context.json"
+    elif location == "traversal":
+        context = setup["root"] / ".." / "context.json"
+    elif location == "symlink":
+        alias = setup["root"] / "alias.json"
+        alias.symlink_to(context)
+        context = alias
+    else:
+        context.unlink()
+    with pytest.raises(SystemExit):
+        launcher.main(setup["args"] + ["--run-context", str(context), "--validate-local-inputs"])
+
+
+def test_absent_private_context_is_not_fabricated(setup):
+    result = plan(setup)
+    assert result["private_run_context"] is None
+    assert "--run-context" not in result["argv"]
+
+
+def test_changed_verified_private_context_stops_generated_script(setup):
+    context = setup["root"] / "context.json"
+    context.write_text("{}")
+    plan(setup, ["--run-context", str(context), "--validate-local-inputs"])
+    context.write_text('{"changed":true}')
+    result = fake_run(setup)
+    assert result.returncode != 0
+    assert not (setup["paths"]["output-dir"] / "argv.json").exists()
+
+
+def test_private_context_symlink_created_after_plan_stops_before_output(setup):
+    context = setup["root"] / "context.json"
+    context.write_text("{}")
+    plan(setup, ["--run-context", str(context)])
+    target = setup["root"] / "target.json"
+    context.rename(target)
+    context.symlink_to(target)
+    result = fake_run(setup)
+    assert result.returncode != 0
+    assert not setup["paths"]["output-dir"].exists()
+    assert not (setup["root"] / "module-order").exists()

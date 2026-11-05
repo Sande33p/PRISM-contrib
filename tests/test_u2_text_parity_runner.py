@@ -351,7 +351,8 @@ def test_trace_events_keep_context_and_actual_selection_values(tmp_path, generat
         assert event["selection_observation"] == "actual sampler locals"
 
 
-def test_declared_context_cannot_substitute_for_observed_job(tmp_path, monkeypatch):
+@pytest.mark.parametrize("observed", ["absent", "job_mismatch", "modules_mismatch"])
+def test_declared_context_cannot_substitute_for_observed_job(tmp_path, monkeypatch, observed):
     context = {
         "acceptance_document_revision": "synthetic",
         "oracle_instrumentation_diff_and_review": "synthetic",
@@ -388,13 +389,25 @@ def test_declared_context_cannot_substitute_for_observed_job(tmp_path, monkeypat
     monkeypatch.setattr(runner, "_git", lambda *a: "" if a[0] == "status" else "synthetic")
     monkeypatch.delenv("PBS_JOBID", raising=False)
     monkeypatch.delenv("LOADEDMODULES", raising=False)
+    if observed != "absent":
+        monkeypatch.setenv(
+            "PBS_JOBID", "different" if observed == "job_mismatch" else "synthetic-job"
+        )
+        monkeypatch.setenv(
+            "LOADEDMODULES",
+            "different/module" if observed == "modules_mismatch" else "synthetic/module",
+        )
     monkeypatch.setattr(
         runner, "verify_manifest", lambda *a, **k: pytest.fail("must fail before inputs")
     )
     result = runner.execute(args)
-    assert result["status"] == "incomplete"
-    assert result["allocation_observation"]["job_id"] is None
-    assert "observed PBS" in result["failure_reasons"][0]
+    if observed == "absent":
+        assert result["status"] == "incomplete"
+        assert result["allocation_observation"]["job_id"] is None
+        assert "observed PBS" in result["failure_reasons"][0]
+    else:
+        assert result["status"] == "fail"
+        assert "differ from admitted" in result["failure_reasons"][0]
 
 
 def test_missing_selection_in_both_paths_remains_incomplete(tmp_path, generator, report):

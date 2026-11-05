@@ -2,7 +2,8 @@
 
 No hub loader or checkpoint-supplied executable code is used. Callers must admit
 immutable manifest hashes independently. CPU fixture tests do not qualify the
-pinned model import graph. XPU import currently fails closed before model import.
+pinned model import graph. The disclosed split-only profile excludes two unused
+fused/distributed imports while preserving all pinned computation and dependencies.
 """
 
 from __future__ import annotations
@@ -20,8 +21,9 @@ import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path, PurePosixPath
-from types import MappingProxyType, ModuleType
+from types import FunctionType, MappingProxyType, MethodType, ModuleType
 from typing import Any, cast
 
 import torch
@@ -34,11 +36,15 @@ from .u2_text_runtime import EOA, MASK, LocalModelSpec
 from .u2_text_tokenizer import BoundTextTokenizer, bind_local_tokenizer
 
 CHECKPOINT_REVISION = "8e3d57f3cb190323334752952a622bb5b97086c1"
-XPU_IMPORT_LIMITATION = (
-    "Pinned XPU import unavailable: model -> veomni.ops -> fused_moe -> distributed.moe "
-    "-> moe_layer -> group_gemm @pretuned -> config/path -> utils/device unconditionally "
-    "queries torch.cuda.get_device_capability; missing Triton may fail earlier. "
-    "No import adaptation is installed; checkpoint loading was not attempted."
+_MODEL_SOURCE = "models/internluminau2/modeling_internluminau2.py"
+_MODEL_SHA256 = "badb75508d4cda0964f76a19aa6dd32d20e72f5a52f4615abff1b78d6ded18b0"
+_SPLIT_IMPORTS = (
+    b"from veomni.ops import fused_moe_forward\n"
+    b"from veomni.distributed.parallel_state import get_parallel_state\n"
+)
+_SPLIT_REPLACEMENT = (
+    b"from src.backends.u2_checkpoint import _unsupported_split_optional as fused_moe_forward\n"
+    b"from src.backends.u2_checkpoint import _unsupported_split_optional as get_parallel_state\n"
 )
 _PACKED = re.compile(
     r"\.experts\.(?:gate_proj|up_proj|gate_up_proj|down_proj|w[123])(?:\.weight)?$"
@@ -60,6 +66,43 @@ class CheckpointError(ValueError):
 
 class UnsupportedRuntimeError(RuntimeError):
     """Execution cannot be qualified in the selected runtime."""
+
+
+def _unsupported_split_optional(*args: Any, **kwargs: Any) -> Any:
+    raise UnsupportedRuntimeError("packed/fused/distributed execution excluded by split-only-v1")
+
+
+def split_source(content: bytes) -> bytes:
+    """Adapt exactly two import statements; all pinned function bodies stay intact."""
+    if sha256(content) != _MODEL_SHA256 or content.count(_SPLIT_IMPORTS) != 1:
+        raise CheckpointError("split-only import profile requires exact pinned model source")
+    return content.replace(_SPLIT_IMPORTS, _SPLIT_REPLACEMENT, 1)
+
+
+def split_adaptation(source: VerifiedFiles) -> dict[str, Any]:
+    """Disclose original and compiled source identities, without editing upstream."""
+    original = source.read(_MODEL_SOURCE)
+    compiled = split_source(original)
+    return {
+        "profile": "split-only-v1",
+        "path": _MODEL_SOURCE,
+        "original_sha256": sha256(original),
+        "compiled_sha256": sha256(compiled),
+        "removed_imports": _SPLIT_IMPORTS.decode(),
+        "replacement_imports": _SPLIT_REPLACEMENT.decode(),
+        "excluded_symbols": ["fused_moe_forward", "get_parallel_state"],
+        "computation_changes": [],
+        "optional_packages": "veomni_patch and liger_kernel must be absent",
+    }
+
+
+def _reject_optional_code() -> None:
+    # Called only after installing the effective source + VeOmni search path.
+    for name in ("veomni_patch", "liger_kernel"):
+        if any(k == name or k.startswith(name + ".") for k in sys.modules):
+            raise UnsupportedRuntimeError(f"unadmitted optional {name} already loaded")
+        if importlib.machinery.PathFinder.find_spec(name, sys.path) is not None:
+            raise UnsupportedRuntimeError(f"unadmitted optional {name} on effective import path")
 
 
 def sha256(content: bytes) -> str:
@@ -145,7 +188,8 @@ class VerifiedFiles:
         path = safe_path(self.root, name)
         if not path.is_file():
             raise CheckpointError(f"required regular artifact missing: {name}")
-        content = path.read_bytes()
+        with path.open("rb") as stream:
+            content = stream.read(expected["bytes"] + 1)
         if len(content) != expected["bytes"] or sha256(content) != expected["sha256"]:
             raise CheckpointError(f"artifact changed: {name}")
         return content
@@ -367,10 +411,12 @@ def strict_load(
     """Bind every constructed state key to exact checkpoint tensors, without casts.
 
     Full key/shape/dtype equality is checked before the first assignment. Shard
-    assignment is streamed, but no partially loaded object is returned on error.
-    All state bytes are read back and compared after assignment.
+    assignment uses one verified owned shard buffer plus deserializer allocations;
+    the largest production shard is approximately 5 GB. Model storage and tensor
+    hashing are additional. Allocation failure propagates; no partial object is
+    returned. All state bytes are read back and compared after assignment.
     """
-    from safetensors import safe_open
+    from safetensors.torch import load
 
     expected = model.state_dict()
     if set(expected) != set(entries):
@@ -385,27 +431,27 @@ def strict_load(
             or tensor.dtype != entry.dtype
         ):
             raise CheckpointError(f"constructed model shape/dtype mismatch: {key}")
-    open_safetensors = cast(Callable[..., Any], safe_open)
+    del expected  # Do not retain the replaced constructor tensors across all shards.
+    load_safetensors = cast(Callable[[bytes], dict[str, Tensor]], load)
     hashes: dict[str, str] = {}
     for name in sorted({v.shard for v in entries.values()}):
-        path = files.verify(name)
-        with open_safetensors(str(path), framework="pt", device="cpu") as handle:
-            keys = {k for k, v in entries.items() if v.shard == name}
-            if set(handle.keys()) != keys:
-                raise CheckpointError("shard keys changed")
-            state = {key: handle.get_tensor(key) for key in keys}
-            for key, tensor in state.items():
-                entry = entries[key]
-                if tuple(tensor.shape) != entry.shape or tensor.dtype != entry.dtype:
-                    raise CheckpointError("shard tensor metadata changed")
-                hashes[key] = tensor_hash(tensor)
-            incompatible = model.load_state_dict(state, strict=False, assign=True)
-            if (
-                incompatible.unexpected_keys
-                or set(incompatible.missing_keys) != set(entries) - keys
-            ):
-                raise CheckpointError("model state assignment deviated from checked keys")
-        files.verify(name)
+        # The immutable owned buffer is both hashed and deserialized. No second
+        # pathname open can substitute A->B->A bytes between trust and use.
+        owned = files.read(name)
+        state = load_safetensors(owned)
+        del owned
+        keys = {k for k, v in entries.items() if v.shard == name}
+        if set(state) != keys:
+            raise CheckpointError("shard keys changed")
+        for key, tensor in state.items():
+            entry = entries[key]
+            if tuple(tensor.shape) != entry.shape or tensor.dtype != entry.dtype:
+                raise CheckpointError("shard tensor metadata changed")
+            hashes[key] = tensor_hash(tensor)
+        incompatible = model.load_state_dict(state, strict=False, assign=True)
+        if incompatible.unexpected_keys or set(incompatible.missing_keys) != set(entries) - keys:
+            raise CheckpointError("model state assignment deviated from checked keys")
+        del state
     actual = model.state_dict()
     if set(actual) != set(hashes) or any(
         t.is_meta or tensor_hash(t) != hashes[k] for k, t in actual.items()
@@ -418,6 +464,8 @@ def strict_load(
         "missing_keys": [],
         "unexpected_keys": [],
         "conversions": [],
+        "consumption": "sha256-verified immutable per-shard bytes -> safetensors.torch.load",
+        "largest_owned_shard_bytes": max(files.files[v.shard]["bytes"] for v in entries.values()),
         "tensors": {
             k: {
                 "shape": list(v.shape),
@@ -431,15 +479,24 @@ def strict_load(
 
 
 class _PinnedFinder(importlib.abc.MetaPathFinder):
-    def __init__(self, source: VerifiedFiles, roots: tuple[str, ...]) -> None:
-        self.source, self.roots = source, roots
+    def __init__(self, source: VerifiedFiles, roots: tuple[str, ...], model_import: bool) -> None:
+        self.source, self.roots, self.model_import = source, roots, model_import
 
     def find_spec(
         self, fullname: str, path: Sequence[str] | None = None, target: ModuleType | None = None
     ) -> importlib.machinery.ModuleSpec | None:
-        if fullname.split(".")[0] not in self.roots:
-            return None
+        pinned = fullname.split(".")[0] in self.roots
+        if pinned:
+            _reject_optional_code()
+        if fullname.startswith(("veomni.ops", "veomni.distributed")) and self.model_import:
+            raise UnsupportedRuntimeError("split-only profile excludes veomni ops/distributed")
         spec = importlib.machinery.PathFinder.find_spec(fullname, path, target)
+        if not pinned and (
+            spec is None
+            or spec.origin is None
+            or not Path(spec.origin).absolute().is_relative_to(self.source.root)
+        ):
+            return None
         if spec is None:
             raise UnsupportedRuntimeError(f"pinned module unavailable: {fullname}")
         if spec.origin is None:
@@ -457,23 +514,37 @@ class _PinnedFinder(importlib.abc.MetaPathFinder):
                 raise CheckpointError(f"unmanifested pinned code before import: {relative}")
             self.source.verify(relative)
             # Import the verified source bytes, never a stale timestamp-valid pyc.
-            spec.loader = _VerifiedSourceLoader(fullname, str(file), self.source, relative)
+            spec.loader = _VerifiedSourceLoader(
+                fullname, str(file), self.source, relative, self.model_import
+            )
         return spec
 
 
 class _VerifiedSourceLoader(importlib.machinery.SourceFileLoader):
-    def __init__(self, name: str, path: str, source: VerifiedFiles, relative: str) -> None:
+    def __init__(
+        self, name: str, path: str, source: VerifiedFiles, relative: str, model_import: bool
+    ) -> None:
         super().__init__(name, path)
         self.source, self.relative = source, relative
+        self.model_import = model_import
 
     def get_code(self, fullname: str) -> Any:
-        return compile(self.source.read(self.relative), self.path, "exec", dont_inherit=True)
+        content = self.source.read(self.relative)
+        if self.relative == _MODEL_SOURCE:
+            if not self.model_import:
+                raise UnsupportedRuntimeError("model import requires the explicit split profile")
+            content = split_source(content)
+        return compile(content, self.path, "exec", dont_inherit=True)
 
 
 def require_import_runtime(device: torch.device) -> None:
-    """Fail before model/shard access when pinned imports cannot support a device."""
-    if device.type == "xpu":
-        raise UnsupportedRuntimeError(XPU_IMPORT_LIMITATION)
+    """Admit explicit device metadata, separately from actual device availability."""
+    if (
+        device.type not in ("cpu", "cuda", "xpu")
+        or (device.type != "cpu" and device.index is None)
+        or (device.type == "cpu" and device.index is not None)
+    ):
+        raise UnsupportedRuntimeError("explicit supported device required")
 
 
 @contextmanager
@@ -483,17 +554,25 @@ def pinned_imports(
     """Use only the admitted vendored packages; never fabricate module stubs."""
     if model_import:
         require_import_runtime(device)
-    if importlib.util.find_spec("veomni_patch") is not None:
-        raise UnsupportedRuntimeError("unadmitted optional veomni_patch package")
     roots = ("models", "generators", "utils", "veomni")
     if any(name.split(".")[0] in roots for name in sys.modules):
         raise UnsupportedRuntimeError("pinned package names already imported; use a fresh process")
     original = list(sys.path)
-    finder = _PinnedFinder(source, roots)
+    finder = _PinnedFinder(source, roots, model_import)
     sys.path[:0] = [str(source.root), str(source.root / "VeOmni")]
     sys.meta_path.insert(0, finder)
     try:
+        importlib.invalidate_caches()
+        _reject_optional_code()
+        if model_import:
+            split_adaptation(source)
         yield
+        _reject_optional_code()
+    except ModuleNotFoundError as exc:
+        raise UnsupportedRuntimeError(
+            f"genuine runtime dependency unavailable: {exc.name}; provision a separately "
+            "authorized compatible environment (pinned tokenbridge requires timm==1.0.22)"
+        ) from exc
     finally:
         sys.meta_path.remove(finder)
         sys.path[:] = original
@@ -508,6 +587,8 @@ def imported_code(source: VerifiedFiles) -> list[dict[str, Any]]:
             continue
         path = Path(filename).absolute()
         pinned = name.split(".")[0] in {"models", "generators", "utils", "veomni"}
+        if path.is_relative_to(source.root):
+            pinned = True
         if pinned:
             if not path.is_relative_to(source.root):
                 raise CheckpointError(f"foreign pinned module: {name}")
@@ -529,6 +610,37 @@ def imported_code(source: VerifiedFiles) -> list[dict[str, Any]]:
     return records
 
 
+def _value_binding(value: Any) -> Any:
+    """Snapshot ordinary execution attributes without calling arbitrary objects."""
+    if isinstance(value, Tensor):
+        return (id(value), value.data_ptr(), value._version, tuple(value.shape), value.dtype)
+    if isinstance(value, nn.Module):
+        return (id(value), type(value))
+    if isinstance(value, MethodType):
+        return (id(value.__self__), _value_binding(value.__func__))
+    if isinstance(value, FunctionType):
+        return (
+            id(value),
+            id(value.__code__),
+            _value_binding(value.__defaults__),
+            _value_binding(value.__kwdefaults__),
+        )
+    if isinstance(value, partial):
+        return (
+            id(value),
+            _value_binding(value.func),
+            _value_binding(value.args),
+            _value_binding(value.keywords),
+        )
+    if isinstance(value, tuple | list):
+        return (type(value), tuple(_value_binding(v) for v in value))
+    if isinstance(value, dict):
+        return tuple((k, _value_binding(v)) for k, v in value.items())
+    if value is None or isinstance(value, bool | int | float | str | torch.dtype | torch.device):
+        return (type(value), value)
+    return (id(value), type(value))
+
+
 class BoundCheckpoint:
     """Actual constructed model and state binding, distinct from LocalModelSpec.
 
@@ -547,11 +659,14 @@ class BoundCheckpoint:
         self.spec = spec
         self.tokenizer = tokenizer
         self.provenance = provenance
+        self._spec_binding = spec
+        self._tokenizer_id = id(tokenizer)
         self._model_id = id(model)
         self._class = type(model)
         self._forward = type(model).forward
         self._state = self._snapshot()
         self._modules = self._module_snapshot()
+        self._classes = self._class_snapshot()
         self._hashes = {k: tensor_hash(t) for k, t in self._tensors().items()}
         self._config = json.dumps(cast(Any, model).config.to_dict(), sort_keys=True, default=str)
         self.verify_binding(full=True)
@@ -566,11 +681,22 @@ class BoundCheckpoint:
                 id(module),
                 type(module),
                 type(module).forward,
-                module.__dict__.get("forward"),
-                tuple(module._forward_hooks.items()),
-                tuple(module._forward_pre_hooks.items()),
+                tuple((key, _value_binding(value)) for key, value in module.__dict__.items()),
             )
             for name, module in self.model.named_modules()
+        )
+
+    def _class_snapshot(self) -> tuple[Any, ...]:
+        # Shared methods are bound once per class, not thousands of times per
+        # expert. Include helper methods, descriptors and callable defaults.
+        classes = dict.fromkeys(
+            cls for module in self.model.modules() for cls in type(module).__mro__
+        )
+        return tuple(
+            (cls, key, _value_binding(value))
+            for cls in classes
+            for key, value in cls.__dict__.items()
+            if callable(value) or isinstance(value, staticmethod | classmethod | property)
         )
 
     def _snapshot(self) -> dict[str, tuple[Any, ...]]:
@@ -584,12 +710,19 @@ class BoundCheckpoint:
         self.tokenizer.verify_binding()
         if (
             id(self.model) != self._model_id
+            or self.spec is not self._spec_binding
+            or id(self.tokenizer) != self._tokenizer_id
             or type(self.model) is not self._class
             or type(self.model).forward is not self._forward
             or "forward" in self.model.__dict__
             or any(m.training for m in self.model.modules())
             or self._snapshot() != self._state
             or self._module_snapshot() != self._modules
+            or self._class_snapshot() != self._classes
+            or (
+                getattr(self.spec, "prompt_vocab_size", None) is not None
+                and self.spec.prompt_vocab_size != self.tokenizer.vocab_size
+            )
             or json.dumps(cast(Any, self.model).config.to_dict(), sort_keys=True, default=str)
             != self._config
         ):
@@ -633,6 +766,73 @@ class BoundCheckpoint:
         return result
 
 
+def validate_split_config(config: Mapping[str, Any]) -> None:
+    """Admit the selected eight-channel split architecture, including fused metadata."""
+    required = {
+        "model_type": "llada2_moe",
+        "num_codebooks": 8,
+        "torch_dtype": "bfloat16",
+        "vocab_size": 157184,
+        "num_hidden_layers": 20,
+        "first_k_dense_replace": 1,
+        "num_experts": 256,
+        "num_shared_experts": 1,
+        "hidden_size": 2048,
+        "intermediate_size": 5120,
+        "moe_intermediate_size": 512,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 4,
+        "head_dim": 128,
+        "num_experts_per_tok": 8,
+        "n_group": 8,
+        "topk_group": 4,
+        "max_position_embeddings": 16384,
+        "_moe_implementation": "fused",
+        "use_cache": False,
+        "use_sliding_window": False,
+    }
+    if any(type(config.get(k)) is not type(v) or config.get(k) != v for k, v in required.items()):
+        raise CheckpointError("incompatible split/eight-channel/model-dimension config")
+    if config.get("_attn_implementation", "sdpa") != "sdpa":
+        raise UnsupportedRuntimeError("split-only profile requires SDPA")
+    if config.get("use_segmented_attention", False) is not False:
+        raise UnsupportedRuntimeError("split-only profile excludes segmented attention")
+
+
+def validate_split_model(model: Any, module: ModuleType, config: Any) -> None:
+    """Check the actual full constructed split object, never pruning image weights."""
+    if (
+        type(model) is not module.LLaDA2MoeModelLM
+        or model.config is not config
+        or config.model_type != "llada2_moe"
+        or config._attn_implementation != "sdpa"
+        or model.num_codebooks != 8
+        or model.model.num_codebooks != 8
+        or len(model.model.layers) != config.num_hidden_layers
+        or tuple(model.lm_head.weight.shape) != (157184, config.hidden_size)
+        or tuple(model.model.word_embeddings.weight.shape) != (157184, config.hidden_size)
+        or len(model.lm_img_head) != 8
+        or len(model.model.img_embeddings) != 8
+        or module.is_liger_kernel_available()
+    ):
+        raise CheckpointError("actual constructed split model dimensions/branch differ")
+    for i, layer in enumerate(model.model.layers):
+        mlp = layer.mlp
+        if i < config.first_k_dense_replace:
+            if type(mlp) is not module.LLaDA2MoeMLP:
+                raise CheckpointError("actual dense layer differs")
+        elif (
+            type(mlp) is not module.LLaDA2MoeSparseMoeBlock
+            or type(mlp.experts) is not nn.ModuleList
+            or len(mlp.experts) != config.num_experts
+            or any(type(expert) is not module.LLaDA2MoeMLP for expert in mlp.experts)
+            or type(mlp.shared_experts) is not module.LLaDA2MoeMLP
+        ):
+            raise CheckpointError("actual split/shared expert layout differs")
+    if any(type(m) is module.LLaDA2MoeExperts for m in model.modules()):
+        raise CheckpointError("packed expert object is excluded")
+
+
 def load_checkpoint(
     files: VerifiedFiles,
     source: VerifiedFiles,
@@ -661,13 +861,7 @@ def load_checkpoint(
     require_import_runtime(device)
     entries = inspect_tensors(files)
     config_data = json_object(files.read("config.json"))
-    if (
-        config_data.get("model_type") != "llada2_moe"
-        or config_data.get("num_codebooks", 8) != 8
-        or config_data.get("torch_dtype") != "bfloat16"
-        or config_data.get("vocab_size") != 157184
-    ):
-        raise CheckpointError("incompatible split/eight-channel/model-dimension config")
+    validate_split_config(config_data)
     artifacts = {name: files.read(name) for name in TOKENIZER_ARTIFACT_NAMES if name in files.files}
     bound_tokenizer = bind_local_tokenizer(artifacts, expected_digest=tokenizer_digest(artifacts))
     if (
@@ -690,6 +884,7 @@ def load_checkpoint(
             model = module.LLaDA2MoeModelLM(config)
         finally:
             torch.set_default_dtype(previous)
+        validate_split_model(model, module, config)
     report = strict_load(model, files, entries)
     if model.num_codebooks != 8 or model.lm_head.weight.shape[0] != 157184:
         raise CheckpointError("actual constructed model dimensions differ")
@@ -710,12 +905,13 @@ def load_checkpoint(
         dtype,
         device,
         config.max_position_embeddings,
+        prompt_vocab_size=bound_tokenizer.vocab_size,
     )
     code = imported_code(source)
     provenance = {
         "strict_load": report,
         "imported_code": code,
-        "adaptations": [],
+        "adaptations": [split_adaptation(source)],
         "construction": "pinned LLaDA2MoeConfig -> LLaDA2MoeModelLM -> strict tensor assignment",
         "constructed_class": f"{type(model).__module__}.{type(model).__qualname__}",
         "model_source": inspect.getfile(type(model)),

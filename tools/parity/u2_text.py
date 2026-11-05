@@ -854,6 +854,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         args.acceptance_file,
         args.asset_manifest,
         args.source_manifest,
+        *((args.run_context,) if args.run_context is not None else ()),
     ):
         safe_path(input_path)
         if root.is_relative_to(input_path.absolute()) or input_path.absolute().is_relative_to(root):
@@ -888,7 +889,13 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             raise EvidenceError(
                 "private run context absent: acceptance revision, instrumentation review, ordered modules and authorized allocation unobserved"
             )
-        context_raw = safe_path(args.run_context.parent, args.run_context.name).read_bytes()
+        context_path = safe_path(args.run_context.parent, args.run_context.name)
+        if not context_path.is_file() or context_path.stat().st_size > 8 * 1024 * 1024:
+            raise EvidenceError("private run context must be a bounded regular file")
+        with context_path.open("rb") as stream:
+            context_raw = stream.read(8 * 1024 * 1024 + 1)
+        if len(context_raw) > 8 * 1024 * 1024:
+            raise EvidenceError("private run context exceeds 8 MiB")
         context = json_object(context_raw)
         required = (
             "acceptance_document_revision",
@@ -961,7 +968,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             kind="source",
         )
         result["identities"]["oracle_six_file_manifest"] = SOURCE_HASHES
-        # This explicit capability gate currently refuses XPU before shard access.
+        # Metadata admission is separate from availability and split-model imports.
         require_import_runtime(device)
         backend = getattr(torch, device.type)
         if not backend.is_available() or device.index >= backend.device_count():

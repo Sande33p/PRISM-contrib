@@ -45,6 +45,7 @@ class LocalModelSpec:
     max_position_embeddings: int
     num_codebooks: int = 8
     layout: str = "split"
+    prompt_vocab_size: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -172,6 +173,16 @@ class U2TextRuntime:
             or (spec.device.type == "cpu" and spec.device.index is not None)
             or (spec.device.type in ("cuda", "xpu") and spec.device.index is None)
             or not callable(model)
+            or (
+                spec.prompt_vocab_size is not None
+                and (
+                    type(spec.prompt_vocab_size) is not int
+                    or not max(EXPECTED_SPECIAL_TOKEN_IDS.values())
+                    < spec.prompt_vocab_size
+                    <= identity.vocab_size
+                    or spec.prompt_vocab_size != preflight.tokenizer_vocab_size
+                )
+            )
         ):
             raise ValueError("incompatible local model layout, dtype, device or context capacity")
         self._model = model
@@ -209,7 +220,8 @@ class U2TextRuntime:
         """
         self._check_binding()
         if request.tokenizer_digest != self.identity.tokenizer_digest or any(
-            token >= self.identity.vocab_size for token in request.prompt_ids
+            token >= (self._spec.prompt_vocab_size or self.identity.vocab_size)
+            for token in request.prompt_ids
         ):
             raise ValueError("request does not match the bound tokenizer")
         if BOA in request.prompt_ids or EOA in request.prompt_ids or MASK in request.prompt_ids:

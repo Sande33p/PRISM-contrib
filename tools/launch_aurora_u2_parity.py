@@ -135,13 +135,18 @@ def _generation_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-walltime", help="required bound for non-debug queues")
     parser.add_argument("--max-walltime", help="required bound for non-debug queues")
     parser.add_argument("--validate-local-inputs", action="store_true")
+    parser.add_argument(
+        "--run-context", help="optional private runner evidence path; does not authorize execution"
+    )
     parser.add_argument("--dry-run", action="store_true", default=True)
     return parser
 
 
 def _configuration(args: argparse.Namespace) -> dict[str, Any]:
     paths = {name: _absolute(getattr(args, name)) for name in PATH_FLAGS}
-    for name in PATH_FLAGS:
+    if args.run_context is not None:
+        paths["run_context"] = _absolute(args.run_context)
+    for name in paths:
         if name != "output_dir" and _overlap(paths["output_dir"], paths[name]):
             raise ValueError("runtime output must be disjoint from every input")
     _absolute(args.python)
@@ -181,9 +186,21 @@ def _configuration(args: argparse.Namespace) -> dict[str, Any]:
         for name in ("prism_root", "source_root", "checkpoint_root"):
             if not _local_path(paths[name]).is_dir():
                 raise ValueError(name + " must be an existing directory")
+    context_identity = None
+    if args.run_context is not None:
+        context_identity = {
+            "path": paths["run_context"],
+            "verification": "declared_remote_unverified",
+        }
+        if args.validate_local_inputs:
+            raw = _read_file(_local_path(paths["run_context"]))
+            _object(raw)
+            context_identity.update(sha256=_sha(raw), verification="local_file_hash_verified")
     argv = [args.python, paths["prism_root"] + "/tools/parity/u2_text.py"]
     for name in RUNNER_FLAGS:
         argv.extend(["--" + name.replace("_", "-"), getattr(args, name)])
+    if args.run_context is not None:
+        argv.extend(["--run-context", paths["run_context"]])
     return {
         "schema_version": 1,
         "mode": "dry_run",
@@ -206,6 +223,7 @@ def _configuration(args: argparse.Namespace) -> dict[str, Any]:
         "cwd": paths["prism_root"],
         "paths": paths,
         "identities": identities,
+        "private_run_context": context_identity,
         "prism_revision": {"value": args.prism_revision, "verification": "declared_unverified"},
         "oracle_revision": SOURCE_REVISION,
         "runtime_existence": "unverified",
@@ -251,7 +269,7 @@ def _script(plan: dict[str, Any]) -> bytes:
         "    done",
         "}",
     ]
-    lines.extend(shlex.join(["check_path", paths[name]]) for name in PATH_FLAGS)
+    lines.extend(shlex.join(["check_path", paths[name]]) for name in paths)
     lines.extend(
         [
             "out=" + shlex.quote(paths["output_dir"]),
@@ -301,7 +319,31 @@ def _script(plan: dict[str, Any]) -> bytes:
     check.append(plan["argv"][1])
     for name in IDENTITY_FLAGS:
         check.extend([paths[name], plan["identities"][name]["sha256"]])
-    lines.extend([shlex.join(check), shlex.join(plan["execution_argv"]), ""])
+    lines.append(shlex.join(check))
+    if plan["private_run_context"] is not None:
+        context_check = (
+            "import hashlib,json,pathlib,sys\np=pathlib.Path(sys.argv[1])\n"
+            f"if not p.is_file() or p.is_symlink() or p.stat().st_size > {MAX_FILE_BYTES}:\n"
+            "    raise SystemExit('invalid private context')\n"
+            f"with p.open('rb') as stream: data=stream.read({MAX_FILE_BYTES + 1})\n"
+            f"if len(data) > {MAX_FILE_BYTES} or not isinstance(json.loads(data),dict):\n"
+            "    raise SystemExit('private context must be a bounded object')\n"
+            "if sys.argv[2] and hashlib.sha256(data).hexdigest()!=sys.argv[2]:\n"
+            "    raise SystemExit('private context SHA256 mismatch')\n"
+        )
+        lines.append(
+            shlex.join(
+                [
+                    plan["argv"][0],
+                    "-B",
+                    "-c",
+                    context_check,
+                    paths["run_context"],
+                    plan["private_run_context"].get("sha256", ""),
+                ]
+            )
+        )
+    lines.extend([shlex.join(plan["execution_argv"]), ""])
     return "\n".join(lines).encode()
 
 
