@@ -371,12 +371,20 @@ def preflight_u2(
                     )
                 inspect("checkpoint", shard, expected_hashes.get(shard))
             if any(
-                re.search(r"\.experts\.(?:gate_up_proj|down_proj|w[123])(?:\.weight)?$", key)
+                re.search(
+                    r"\.experts\.(?:gate_proj|up_proj|gate_up_proj|down_proj|w[123])(?:\.weight)?$",
+                    key,
+                )
                 for key in weight_map
             ):
                 split = "packed"
                 raise ValueError("packed expert keys are incompatible with split-only inference")
-            if any(re.search(r"\.experts\.\d+\.", key) for key in weight_map):
+            if any(
+                re.search(
+                    r"\.mlp\.experts\.\d+\.(?:gate_proj|up_proj|down_proj)(?:\.weight)?$", key
+                )
+                for key in weight_map
+            ):
                 split = "split_candidate"
             else:
                 raise ValueError("split layout cannot be established from index keys")

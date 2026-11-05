@@ -236,6 +236,65 @@ def test_split_layout_is_not_assumed(bundle, key, assessment):
     assert result.split_layout == assessment and not result.metadata_complete
 
 
+@pytest.mark.parametrize(
+    "projection", ["gate_proj", "up_proj", "down_proj", "gate_up_proj", "w1", "w2", "w3"]
+)
+@pytest.mark.parametrize("suffix", ["", ".weight"])
+def test_packed_experts_override_valid_split_candidate(bundle, projection, suffix):
+    source, checkpoint, req = bundle
+    write_json(
+        checkpoint / "model.safetensors.index.json",
+        {
+            "weight_map": {
+                "model.layers.0.mlp.experts.0.gate_proj.weight": "part.safetensors",
+                f"model.layers.1.mlp.experts.{projection}{suffix}": "part.safetensors",
+            }
+        },
+    )
+    result = preflight.preflight_u2(source, checkpoint, req)
+    assert result.split_layout == "packed"
+    assert not result.metadata_complete
+    assert any("packed expert keys" in error for error in result.incompatible)
+
+
+@pytest.mark.parametrize("projection", ["gate_proj", "up_proj", "down_proj"])
+@pytest.mark.parametrize("suffix", ["", ".weight"])
+def test_split_candidate_requires_upstream_projection(bundle, projection, suffix):
+    source, checkpoint, req = bundle
+    write_json(
+        checkpoint / "model.safetensors.index.json",
+        {"weight_map": {f"model.layers.0.mlp.experts.12.{projection}{suffix}": "part.safetensors"}},
+    )
+    result = preflight.preflight_u2(source, checkpoint, req)
+    result.require_metadata()
+    assert result.split_layout == "split_candidate"
+    assert not result.execution_qualified
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "model.layers.0.mlp.experts.0.unrelated.weight",
+        "model.layers.0.mlp.experts.0.gate_up_proj.weight",
+        "model.layers.0.mlp.experts.0.gate_proj.bias",
+        "model.layers.0.mlp.experts.0.up_proj.weight.extra",
+        "model.layers.0.mlp.experts.other.down_proj.weight",
+        "model.layers.0.attention.experts.0.gate_proj.weight",
+        "model.layers.0.experts.0.up_proj",
+        "model.layers.0.mlp.other.0.down_proj.weight",
+    ],
+)
+def test_unrelated_or_misplaced_expert_keys_are_not_split_candidates(bundle, key):
+    source, checkpoint, req = bundle
+    write_json(
+        checkpoint / "model.safetensors.index.json", {"weight_map": {key: "part.safetensors"}}
+    )
+    result = preflight.preflight_u2(source, checkpoint, req)
+    assert result.split_layout == "unknown"
+    assert not result.metadata_complete
+    assert any("split layout cannot be established" in error for error in result.incompatible)
+
+
 def test_missing_runtime_distribution(bundle):
     source, checkpoint, req = bundle
     result = preflight.preflight_u2(

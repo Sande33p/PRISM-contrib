@@ -13,6 +13,7 @@ from dataclasses import replace
 
 import pytest
 import torch
+from src.backends import u2_text_runtime
 from src.backends.text_contracts import RuntimeIdentity, TextRequest
 from src.backends.u2_preflight import preflight_u2
 from src.backends.u2_reference import (
@@ -209,6 +210,91 @@ def test_literal_reveal_quotas_include_zero_forwards(report, n, steps, quotas):
     assert_receipt(result, [i % 2 + 1 for i in range(n)], [n], "length", steps, (n + 3) * steps)
     counts = [int((c["input_ids"][0, 3:, 0] != M).sum()) for c in model.calls] + [n]
     assert [b - a for a, b in zip(counts[:-1], counts[1:], strict=True)] == quotas
+
+
+def test_zero_quota_forwards_validate_without_sampling(report, monkeypatch):
+    model, runtime, adapter = setup(report)
+    sampled = {name: [] for name in ("argmax", "to", "softmax", "gather", "where", "topk")}
+    validated = []
+    original_logits = runtime._logits
+
+    def validate(value, n):
+        validated.append(len(model.calls))
+        return original_logits(value, n)
+
+    def track(owner, name):
+        original = getattr(owner, name)
+
+        def wrapped(*args, **kwargs):
+            sampled[name].append(len(model.calls))
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(owner, name, wrapped)
+
+    monkeypatch.setattr(runtime, "_logits", validate)
+    for name in ("argmax", "to", "gather"):
+        track(torch.Tensor, name)
+    for name in ("softmax", "where", "topk"):
+        track(torch, name)
+    req = request(report.tokenizer_digest, max_new_tokens=3, block_size=2, steps_per_block=4)
+    result = adapter.generate(req)
+    assert_receipt(result, [1, 2, 1], [2, 3], "length", 8, 44)
+    assert validated == list(range(1, 9))
+    for name, calls in sampled.items():
+        assert calls == ([1, 1, 2, 2, 5, 5] if name == "where" else [1, 2, 5]), name
+    assert_replay(adapter, model, req, result)
+
+
+@pytest.mark.parametrize("bad", ["nan", "shape", "dtype"])
+def test_invalid_logits_on_zero_quota_forward_still_fail(report, bad):
+    def operation(model, n):
+        logits = row_logits(n, model.spec.identity.vocab_size)
+        # The first block is committed; call 6 is a zero-quota second-block step.
+        if len(model.calls) == 6:
+            if bad == "nan":
+                logits[0, 0] = torch.nan
+            elif bad == "shape":
+                return logits[None]
+            else:
+                return logits.double()
+        return logits
+
+    model, _, adapter = setup(report, operation)
+    req = request(report.tokenizer_digest, max_new_tokens=3, block_size=2, steps_per_block=4)
+    result = adapter.generate(req)
+    assert_receipt(result, [1, 2], [2], "error", 6, 32)
+    assert result.error_code == "runtime_error"
+    assert_replay(adapter, model, req, result)
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+@pytest.mark.parametrize("cap", [2, 128])
+def test_block_boundary_stops_before_next_allocation(report, monkeypatch, cancel, cap):
+    model, _, adapter = setup(report)
+    req = request(report.tokenizer_digest, max_model_calls=cap)
+    original_mask = u2_text_runtime._text_attention_mask
+    original_commit = ExecutionControl.commit
+    allocations = []
+
+    def mask(*args, **kwargs):
+        allocations.append(len(model.calls))
+        if len(allocations) > 1:
+            raise MemoryError("next block allocation attempted")
+        return original_mask(*args, **kwargs)
+
+    def commit(control, ids):
+        original_commit(control, ids)
+        if cancel:
+            assert adapter.cancel(req.request_id)
+
+    monkeypatch.setattr(u2_text_runtime, "_text_attention_mask", mask)
+    monkeypatch.setattr(ExecutionControl, "commit", commit)
+    result = adapter.generate(req)
+    reason = "cancelled" if cancel else ("budget" if cap == 2 else "error")
+    assert_receipt(result, [1, 2, 1], [3], reason, 2, 12)
+    assert allocations == ([0, 2] if reason == "error" else [0])
+    assert result.error_code == ("runtime_error" if reason == "error" else None)
+    assert_replay(adapter, model, req, result)
 
 
 @pytest.mark.parametrize("shift", [0, 100])

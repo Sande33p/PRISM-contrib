@@ -87,6 +87,13 @@ The usage receipt reports prompt and committed completion counts plus
 forward still counts as a call; repeated processing still counts positions.
 Counts are not inferred from requested steps or generated token length.
 
+`control.check_can_continue()` checks live state, cancellation and the call
+budget before the runtime allocates each block's tensors and attention mask.
+It consumes no calls or positions and reserves no future operation;
+`run_model_call` still validates and rechecks admission for every actual forward.
+Zero-quota steps execute and validate their forward but skip sampling, including
+the float64 softmax and confidence ranking.
+
 `model_calls` and `processed_positions` are aggregate totals only when
 `complete` is true. Runtime/protocol errors or interrupted operations leave
 the totals unknown (`null` in JSON), retaining the observed lower bounds.
@@ -194,8 +201,58 @@ Unsafe paths/escaping symlinks, empty files, malformed JSON, incorrect source
 hashes, missing shards and incompatible token/config/layout identities fail
 metadata admission. Tokenizer bytes are bounded to 64 MiB per file and checked
 against their just-observed file hash. Use a stable local snapshot; concurrent
-file or object mutation is not supported. The original six-entry source
-manifest remains separate from the supplemental source manifest.
+file or object mutation is not supported.
+
+### Prepare the source manifest
+
+A clean checkout of the pinned upstream revision does **not** include
+`source-manifest.json`. Before calling preflight, prepare
+`source_root/source-manifest.json` locally. It must be a JSON list of exactly
+six entries, one for each unique relative path in `SOURCE_HASHES` from
+[`src/backends/u2_preflight.py`](../../src/backends/u2_preflight.py):
+`infer_mmu_sft.py`, `generators/text_understanding_generator.py`,
+`utils/generation_utils.py`, `utils/tokenizer_contract.py`, `LICENSE`, and
+`README.md`.
+
+Each entry has `path`, `sha256`, and `revision` fields. Its `path` must match
+the corresponding `SOURCE_HASHES` key exactly, `sha256` must equal that key's
+lowercase 64-character SHA256 value, and `revision` must be the full
+`SOURCE_REVISION`, `70f21c1df8fa26e514df26ba31bc061be8d3d018`.
+Do not add, omit or duplicate paths. Preflight verifies both this mapping and
+the actual source file bytes; declaring a revision alone is not verification.
+
+From the PRISM repository root, this example verifies all six local files
+before writing the manifest (replace the source directory argument):
+
+```bash
+python - /path/to/local/InternLumina-U2 <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+from src.backends.u2_preflight import SOURCE_HASHES, SOURCE_REVISION
+
+source_root = Path(sys.argv[1]).resolve(strict=True)
+entries = []
+for name, expected in sorted(SOURCE_HASHES.items()):
+    path = (source_root / name).resolve(strict=True)
+    if not path.is_relative_to(source_root):
+        raise SystemExit(f"Source path escapes root: {name}")
+    observed = hashlib.sha256(path.read_bytes()).hexdigest()
+    if observed != expected:
+        raise SystemExit(f"Source SHA256 mismatch: {name}")
+    entries.append({"path": name, "sha256": observed, "revision": SOURCE_REVISION})
+with (source_root / "source-manifest.json").open("x", encoding="utf-8") as manifest:
+    json.dump(entries, manifest, indent=2)
+    manifest.write("\n")
+PY
+```
+
+The example refuses to overwrite an existing manifest. Supplemental provenance
+records for additional source files are separate, optional evidence; preflight
+does not consume them. Do not append supplemental entries to this six-entry
+manifest.
 
 `report.require_metadata()` does not qualify model execution:
 `execution_qualified` remains `False`, and `split_candidate` describes index

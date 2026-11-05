@@ -221,6 +221,7 @@ class U2TextRuntime:
         decoded: list[int] = []
         with torch.inference_mode():
             for offset in range(0, request.max_new_tokens, request.block_size):
+                control.check_can_continue()
                 n = min(request.block_size, request.max_new_tokens - offset)
                 code_start = prefix_length + 1 + offset
                 sequence = [*request.prompt_ids, BOA, *decoded, *([MASK] * n)]
@@ -264,17 +265,18 @@ class U2TextRuntime:
                         ),
                     )
                     logits = self._logits(result, n)
+                    quota = n // request.steps_per_block + int(step < n % request.steps_per_block)
+                    if quota == 0:
+                        continue
                     candidates = logits.argmax(dim=-1)
                     probabilities = torch.softmax(logits.to(torch.float64), dim=-1)
                     confidence = probabilities.gather(1, candidates[:, None]).squeeze(1)
                     current = x[0, code_start:, 0]
                     confidence = torch.where(current == MASK, confidence, -torch.inf)
-                    quota = n // request.steps_per_block + int(step < n % request.steps_per_block)
-                    if quota:
-                        selected = torch.topk(confidence, k=quota).indices
-                        # Already revealed tokens are stable, even if later logits differ.
-                        predictions = torch.where(current == MASK, candidates, current)
-                        x[0, code_start + selected, :] = predictions[selected, None].expand(-1, 8)
+                    selected = torch.topk(confidence, k=quota).indices
+                    # Already revealed tokens are stable, even if later logits differ.
+                    predictions = torch.where(current == MASK, candidates, current)
+                    x[0, code_start + selected, :] = predictions[selected, None].expand(-1, 8)
                 block: list[int] = x[0, code_start:, 0].tolist()
                 if MASK in block:
                     raise ValueError("completed block contains unresolved mask IDs")
