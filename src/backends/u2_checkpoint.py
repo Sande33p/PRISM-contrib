@@ -12,6 +12,7 @@ import hashlib
 import importlib
 import importlib.abc
 import importlib.machinery
+import importlib.util
 import inspect
 import json
 import re
@@ -101,8 +102,30 @@ def _reject_optional_code() -> None:
     for name in ("veomni_patch", "liger_kernel"):
         if any(k == name or k.startswith(name + ".") for k in sys.modules):
             raise UnsupportedRuntimeError(f"unadmitted optional {name} already loaded")
-        if importlib.machinery.PathFinder.find_spec(name, sys.path) is not None:
-            raise UnsupportedRuntimeError(f"unadmitted optional {name} on effective import path")
+        # PathFinder alone misses editable installs and other meta providers.
+        # Resolve without loading code or recursing through our admission finder.
+        # Do not cache absence: a provider may become available during the context.
+        for finder in tuple(sys.meta_path):
+            if isinstance(finder, _PinnedFinder):
+                continue
+            find_spec = getattr(finder, "find_spec", None)
+            if find_spec is not None:
+                spec = find_spec(name, None)
+            else:
+                # Match Python 3.10's fallback for legacy meta providers.
+                find_module = getattr(finder, "find_module", None)
+                if find_module is None:
+                    raise UnsupportedRuntimeError("import provider has no module resolver")
+                module_loader = find_module(name, None)
+                spec = (
+                    importlib.util.spec_from_loader(name, module_loader)
+                    if module_loader is not None
+                    else None
+                )
+            if spec is not None:
+                raise UnsupportedRuntimeError(
+                    f"unadmitted optional {name} on effective import path"
+                )
 
 
 def sha256(content: bytes) -> str:
@@ -486,7 +509,7 @@ class _PinnedFinder(importlib.abc.MetaPathFinder):
         self, fullname: str, path: Sequence[str] | None = None, target: ModuleType | None = None
     ) -> importlib.machinery.ModuleSpec | None:
         pinned = fullname.split(".")[0] in self.roots
-        if pinned:
+        if pinned or fullname.split(".")[0] in ("veomni_patch", "liger_kernel"):
             _reject_optional_code()
         if fullname.startswith(("veomni.ops", "veomni.distributed")) and self.model_import:
             raise UnsupportedRuntimeError("split-only profile excludes veomni ops/distributed")

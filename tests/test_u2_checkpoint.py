@@ -1,4 +1,4 @@
-"""Tiny CPU safetensors validate strict loading; no real checkpoint/code executes."""
+"""CPU contracts; integration-marked checks opt in to local pinned source only."""
 
 import hashlib
 import json
@@ -376,7 +376,7 @@ def test_traversal_root_and_nonregular_manifest_fail_without_opening(tmp_path):
 
 
 @pytest.mark.parametrize("name", ["veomni_patch", "liger_kernel"])
-@pytest.mark.parametrize("location", ["root", "vendored", "external", "loaded"])
+@pytest.mark.parametrize("location", ["root", "vendored", "external", "loaded", "loaded_child"])
 def test_optional_code_rejected_on_effective_path_before_side_effect(
     tmp_path, monkeypatch, name, location
 ):
@@ -386,8 +386,9 @@ def test_optional_code_rejected_on_effective_path_before_side_effect(
     source = tmp_path / "source"
     (source / "VeOmni").mkdir(parents=True)
     marker = tmp_path / "executed"
-    if location == "loaded":
-        monkeypatch.setitem(sys.modules, name, ModuleType(name))
+    if location.startswith("loaded"):
+        loaded = name + ".child" if location == "loaded_child" else name
+        monkeypatch.setitem(sys.modules, loaded, ModuleType(loaded))
     else:
         target = source if location == "root" else source / "VeOmni"
         if location == "external":
@@ -402,6 +403,120 @@ def test_optional_code_rejected_on_effective_path_before_side_effect(
             pytest.fail("optional code admitted")
     assert not marker.exists()
     assert sys.path == before_path and sys.meta_path == before_meta
+
+
+@pytest.mark.parametrize("name", ["veomni_patch", "liger_kernel"])
+@pytest.mark.parametrize("when", ["entry", "query", "import", "pinned_import"])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_optional_meta_provider_rejected_before_execution(
+    tmp_path, monkeypatch, name, when, legacy
+):
+    import importlib
+    import importlib.abc
+    import sys
+
+    marker = tmp_path / "executed"
+
+    class SentinelLoader(importlib.abc.Loader):
+        def create_module(self, spec):
+            return None
+
+        def exec_module(self, module):
+            marker.write_text("executed")
+
+    class Provider:
+        enabled = when == "entry"
+
+        def find_spec(self, fullname, path=None, target=None):
+            if self.enabled and fullname == name:
+                return importlib.util.spec_from_loader(fullname, SentinelLoader())
+            return None
+
+    class LegacyProvider:
+        enabled = when == "entry"
+
+        def find_module(self, fullname, path=None):
+            if self.enabled and fullname == name:
+                return SentinelLoader()
+            return None
+
+    provider = LegacyProvider() if legacy else Provider()
+    monkeypatch.setattr(sys, "meta_path", [*sys.meta_path, provider])
+    source = tmp_path / "source"
+    (source / "VeOmni" / "veomni").mkdir(parents=True)
+    initializer = source / "VeOmni" / "veomni" / "__init__.py"
+    initializer.write_text(
+        f"import importlib.util\nif importlib.util.find_spec({name!r}) is not None:\n"
+        f"    __import__({name!r})\n"
+    )
+    files = loader.VerifiedFiles(
+        source,
+        "synthetic",
+        {
+            "VeOmni/veomni/__init__.py": {
+                "bytes": initializer.stat().st_size,
+                "sha256": hashlib.sha256(initializer.read_bytes()).hexdigest(),
+            }
+        },
+        {},
+    )
+    before_path, before_meta = list(sys.path), list(sys.meta_path)
+    before_modules = {k: v for k, v in sys.modules.items() if k.split(".")[0] in (name, "veomni")}
+    assert not before_modules
+    with pytest.raises(UnsupportedRuntimeError, match=name):
+        with loader.pinned_imports(files, device=torch.device("cpu"), model_import=False):
+            assert importlib.util.find_spec(name) is None
+            provider.enabled = True
+            if when == "query":
+                importlib.util.find_spec(name)
+            else:
+                importlib.import_module("veomni" if when == "pinned_import" else name)
+    assert not marker.exists()
+    assert sys.path == before_path and sys.meta_path == before_meta
+    assert {
+        k: v for k, v in sys.modules.items() if k.split(".")[0] in (name, "veomni")
+    } == before_modules
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_absent_optional_queries_allow_admitted_meta_dependency_and_restore_state(
+    tmp_path, monkeypatch, fail
+):
+    import importlib
+    import importlib.abc
+    import sys
+
+    name = "u2_admitted_dependency"
+
+    class DependencyLoader(importlib.abc.Loader):
+        def create_module(self, spec):
+            return None
+
+        def exec_module(self, module):
+            module.value = 37
+
+    class Provider(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path=None, target=None):
+            if fullname == name:
+                return importlib.util.spec_from_loader(fullname, DependencyLoader())
+            return None
+
+    monkeypatch.setattr(sys, "meta_path", [*sys.meta_path, Provider()])
+    files = loader.VerifiedFiles(tmp_path, "synthetic", {}, {})
+    before_path, before_meta = list(sys.path), list(sys.meta_path)
+    try:
+        try:
+            with loader.pinned_imports(files, device=torch.device("cpu"), model_import=False):
+                for optional in ("veomni_patch", "liger_kernel"):
+                    assert importlib.util.find_spec(optional) is None
+                assert importlib.import_module(name).value == 37
+                if fail:
+                    raise RuntimeError("consumer failure")
+        except RuntimeError as exc:
+            assert fail and str(exc) == "consumer failure"
+        assert sys.path == before_path and sys.meta_path == before_meta
+    finally:
+        sys.modules.pop(name, None)
 
 
 @pytest.mark.parametrize(
@@ -483,16 +598,162 @@ def pinned_source():
     import os
     from pathlib import Path
 
-    root = Path(os.environ["U2_PINNED_SOURCE_DIR"])
+    value = os.environ.get("U2_PINNED_SOURCE_DIR")
+    if value is None:
+        pytest.skip("optional pinned-source integration: set U2_PINNED_SOURCE_DIR to opt in")
+    if not value.strip():
+        pytest.fail(
+            "invalid U2_PINNED_SOURCE_DIR: explicitly configured path is empty", pytrace=False
+        )
+    root = Path(value)
     manifest = root.parent / "upstream-source-manifest.json"
-    return verify_manifest(
-        root,
-        manifest,
-        expected_sha256=hashlib.sha256(manifest.read_bytes()).hexdigest(),
-        kind="source",
+    try:
+        safe_path(root)
+        if not root.is_dir():
+            raise CheckpointError("source path must be an existing directory")
+        safe_path(manifest.parent, manifest.name)
+        if not manifest.is_file() or manifest.stat().st_size > 64 * 1024 * 1024:
+            raise CheckpointError("upstream-source-manifest.json must be a bounded regular file")
+        raw = manifest.read_bytes()
+        data = json_object(raw)
+        entries = data.get("files")
+        if not isinstance(entries, dict) or not all(
+            isinstance(item, dict) for item in entries.values()
+        ):
+            raise CheckpointError("source manifest files must be an object of file records")
+        return verify_manifest(
+            root, manifest, expected_sha256=hashlib.sha256(raw).hexdigest(), kind="source"
+        )
+    except (OSError, ValueError) as exc:
+        pytest.fail(f"invalid U2_PINNED_SOURCE_DIR / source manifest: {exc}", pytrace=False)
+
+
+def require_genuine_dependencies():
+    import importlib
+    from importlib import metadata
+
+    try:
+        observed = metadata.version("timm")
+    except metadata.PackageNotFoundError:
+        pytest.fail(
+            "configured genuine integration requires timm==1.0.22; package missing", pytrace=False
+        )
+    if observed != "1.0.22":
+        pytest.fail(
+            f"configured genuine integration requires timm==1.0.22; found {observed}", pytrace=False
+        )
+    try:
+        importlib.import_module("timm")
+    except ImportError as exc:
+        pytest.fail(
+            f"configured genuine integration cannot import timm==1.0.22: {exc}", pytrace=False
+        )
+
+
+def test_pinned_source_absent_opt_in_skips(monkeypatch):
+    monkeypatch.delenv("U2_PINNED_SOURCE_DIR", raising=False)
+    with pytest.raises(pytest.skip.Exception, match="set U2_PINNED_SOURCE_DIR to opt in"):
+        pinned_source()
+
+
+@pytest.mark.parametrize("value", ["", "   ", "nonexistent", "file", "traversal"])
+def test_pinned_source_explicit_invalid_path_fails(tmp_path, monkeypatch, value):
+    path = tmp_path / value
+    if value == "file":
+        path.write_text("not a directory")
+    configured = value if not value.strip() else str(path)
+    if value == "traversal":
+        configured = str(tmp_path / ".." / "source")
+    monkeypatch.setenv("U2_PINNED_SOURCE_DIR", configured)
+    with pytest.raises(pytest.fail.Exception, match="invalid U2_PINNED_SOURCE_DIR"):
+        pinned_source()
+
+
+@pytest.mark.parametrize(
+    "kind", ["missing", "malformed", "nonobject", "bad_records", "revision", "hash", "content"]
+)
+def test_pinned_source_explicit_invalid_manifest_fails(tmp_path, monkeypatch, kind):
+    source = tmp_path / "source"
+    source.mkdir()
+    manifest = tmp_path / "upstream-source-manifest.json"
+    data = {"source_revision": loader.SOURCE_REVISION, "files": {}}
+    if kind == "malformed":
+        manifest.write_text("{")
+    elif kind == "nonobject":
+        manifest.write_text("[]")
+    elif kind != "missing":
+        if kind == "bad_records":
+            data["files"] = {"x": None}
+        elif kind == "revision":
+            data["source_revision"] = "wrong"
+        elif kind in ("hash", "content"):
+            for name, digest in loader.SOURCE_HASHES.items():
+                path = source / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"")
+                data["files"][name] = {
+                    "bytes": 0,
+                    "sha256": digest if kind == "content" else "0" * 64,
+                }
+        manifest.write_text(json.dumps(data))
+    monkeypatch.setenv("U2_PINNED_SOURCE_DIR", str(source))
+    with pytest.raises(
+        pytest.fail.Exception, match="invalid U2_PINNED_SOURCE_DIR / source manifest"
+    ):
+        pinned_source()
+
+
+def test_pinned_source_valid_synthetic_manifest(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "synthetic.py").write_bytes(b"value = 37\n")
+    digest = hashlib.sha256((source / "synthetic.py").read_bytes()).hexdigest()
+    monkeypatch.setattr(loader, "SOURCE_HASHES", {"synthetic.py": digest})
+    (tmp_path / "upstream-source-manifest.json").write_text(
+        json.dumps(
+            {
+                "source_revision": loader.SOURCE_REVISION,
+                "files": {"synthetic.py": {"bytes": 11, "sha256": digest}},
+            }
+        )
     )
+    monkeypatch.setenv("U2_PINNED_SOURCE_DIR", str(source))
+    assert pinned_source().read("synthetic.py") == b"value = 37\n"
 
 
+@pytest.mark.parametrize("state", ["missing", "wrong", "unimportable", "valid"])
+def test_genuine_dependency_prerequisite_is_explicit(monkeypatch, state):
+    import importlib
+    from importlib import metadata
+
+    calls = []
+
+    def version(name):
+        assert name == "timm"
+        if state == "missing":
+            raise metadata.PackageNotFoundError(name)
+        return "1.0.21" if state == "wrong" else "1.0.22"
+
+    def import_module(name):
+        calls.append(name)
+        assert name == "timm"
+        if state == "unimportable":
+            raise ModuleNotFoundError("synthetic broken dependency")
+        return SimpleNamespace()
+
+    monkeypatch.setattr(metadata, "version", version)
+    monkeypatch.setattr(importlib, "import_module", import_module)
+    if state == "valid":
+        require_genuine_dependencies()
+    else:
+        with pytest.raises(
+            pytest.fail.Exception, match="configured genuine integration.*timm==1.0.22"
+        ):
+            require_genuine_dependencies()
+    assert calls == (["timm"] if state in ("unimportable", "valid") else [])
+
+
+@pytest.mark.integration
 def test_split_adaptation_changes_only_two_import_ast_nodes():
     import ast
 
@@ -556,6 +817,7 @@ def test_production_split_architecture_rejects_other_layouts(key, value):
         loader.validate_split_config(config)
 
 
+@pytest.mark.integration
 def test_tiny_genuine_pinned_split_cpu_forward_and_weights(tmp_path):
     """Existing genuine dependencies only; fixed <8M parameters, <256 MiB tensor budget.
 
@@ -574,8 +836,8 @@ def test_tiny_genuine_pinned_split_cpu_forward_and_weights(tmp_path):
     from src.backends.u2_text_runtime import LocalModelSpec
     from tools.parity import u2_text as runner
 
-    assert metadata.version("timm") == "1.0.22"
     files = pinned_source()
+    require_genuine_dependencies()
     before = {k: files.files[k]["sha256"] for k in files.files}
     roots = {"models", "generators", "utils", "veomni"}
     prior = {k: v for k, v in sys.modules.items() if k.split(".")[0] in roots}

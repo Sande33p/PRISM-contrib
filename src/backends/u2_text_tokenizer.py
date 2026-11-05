@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from importlib import import_module
 from importlib.metadata import version
 from types import MappingProxyType
-from typing import Any
+from typing import Any, cast
 
 from src.backends.u2_text_renderer import (
     EXPECTED_SPECIAL_TOKEN_IDS,
@@ -277,7 +277,7 @@ class BoundTextTokenizer:
     def tokenizer(self) -> TextTokenizer:
         """Return the actual constructed object after checking the binding."""
         self.verify_binding()
-        return self._tokenizer
+        return cast(TextTokenizer, self._tokenizer)
 
     def verify_binding(self) -> None:
         """Fail closed if the certified construction or object state changed."""
