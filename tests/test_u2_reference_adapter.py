@@ -60,6 +60,98 @@ class Runtime:
         return "eoa"
 
 
+class ExecutionAdmissionTests(unittest.TestCase):
+    def test_checks_do_not_consume_calls_or_prevent_final_commit(self):
+        def generate(value, control):
+            for _ in range(2):
+                for _ in range(3):
+                    self.assertIsNone(control.check_can_continue())
+                control.run_model_call(3, lambda: None)
+            control.commit((7, 99))
+            return "eoa"
+
+        driver = Runtime(generate)
+        result = U2ReferenceAdapter(driver).generate(request(max_model_calls=2))
+        self.assertEqual(result.finish_reason, "eoa")
+        self.assertEqual(result.output_ids, (7,))
+        self.assertEqual(result.usage, UsageReceipt(3, 1, 2, 6, 2, 6, True))
+        with self.assertRaisesRegex(Exception, "already_finalized"):
+            driver.controls[0].check_can_continue()
+
+    def test_call_rechecks_after_successful_non_reserving_check(self):
+        for cancel in (False, True):
+            with self.subTest(cancel=cancel):
+                invoked = []
+                driver = Runtime()
+                adapter = U2ReferenceAdapter(driver)
+
+                def generate(value, control, cancel=cancel, invoked=invoked, adapter=adapter):
+                    control.check_can_continue()
+                    if cancel:
+                        self.assertTrue(adapter.cancel(value.request_id))
+                    else:
+                        control.run_model_call(3, lambda: invoked.append("admitted"))
+                    control.run_model_call(3, lambda: invoked.append("forbidden"))
+                    return "eoa"
+
+                driver.operation = generate
+                result = adapter.generate(request(max_model_calls=1))
+                calls = 0 if cancel else 1
+                self.assertEqual(result.finish_reason, "cancelled" if cancel else "budget")
+                self.assertEqual(invoked, [] if cancel else ["admitted"])
+                self.assertEqual(
+                    result.usage, UsageReceipt(3, 0, calls, 3 * calls, calls, 3 * calls, True)
+                )
+
+    def test_invalid_call_arguments_still_precede_unobserved_budget_exhaustion(self):
+        for positions, operation in ((0, lambda: None), (3, None)):
+            with self.subTest(positions=positions, operation=operation):
+
+                def generate(value, control, positions=positions, operation=operation):
+                    control.check_can_continue()
+                    control.run_model_call(3, lambda: None)
+                    control.run_model_call(positions, operation)
+                    return "eoa"
+
+                result = U2ReferenceAdapter(Runtime(generate)).generate(request(max_model_calls=1))
+                self.assertEqual(result.finish_reason, "error")
+                self.assertEqual(result.error_code, "invalid_model_call")
+                self.assertEqual(result.usage, UsageReceipt(3, 0, 1, 3, None, None, False))
+
+    def test_check_preserves_error_cancellation_and_budget_precedence(self):
+        for error, cancel in ((False, False), (False, True), (True, False), (True, True)):
+            with self.subTest(error=error, cancel=cancel):
+                expected = "invalid_commit" if error else ("cancelled" if cancel else "budget")
+                driver = Runtime()
+                adapter = U2ReferenceAdapter(driver)
+
+                def generate(
+                    value, control, error=error, cancel=cancel, expected=expected, adapter=adapter
+                ):
+                    control.run_model_call(3, lambda: None)
+                    control.commit((7,))
+                    if error:
+                        with self.assertRaisesRegex(Exception, "invalid_commit"):
+                            control.commit((98,))
+                    if cancel:
+                        self.assertTrue(adapter.cancel(value.request_id))
+                    for _ in range(2):
+                        with self.assertRaisesRegex(Exception, expected):
+                            control.check_can_continue()
+                    return "budget"
+
+                driver.operation = generate
+                result = adapter.generate(request(max_model_calls=1))
+                self.assertEqual(result.finish_reason, "error" if error else expected)
+                self.assertEqual(result.error_code, "invalid_commit" if error else None)
+                self.assertEqual(result.output_ids, (7,))
+                self.assertEqual(result.committed_block_ends, (1,))
+                self.assertEqual(
+                    result.usage,
+                    UsageReceipt(3, 1, 1, 3, None if error else 1, None if error else 3, not error),
+                )
+
+
 class ContractValidationTests(unittest.TestCase):
     def test_identity_rejects_invalid_declarations(self):
         for changes in (

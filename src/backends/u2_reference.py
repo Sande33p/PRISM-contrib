@@ -91,6 +91,22 @@ class ExecutionControl:
             self._stop = "cancelled"
             raise _Stopped("cancelled")
 
+    def _check_budget(self) -> None:
+        if self._calls >= self._request.max_model_calls:
+            self._stop = "budget"
+            raise _Stopped("budget")
+
+    def check_can_continue(self) -> None:
+        """Check live state and call budget before preparing another block.
+
+        No call or positions are consumed or reserved. A successful check does
+        not guarantee later admission: run_model_call still validates arguments
+        and rechecks live state and budget under the lock for every operation.
+        """
+        with self._lock:
+            self._check_live()
+            self._check_budget()
+
     def run_model_call(self, processed_positions: int, operation: Callable[[], _T]) -> _T:
         """Execute and count one actual driver operation, enforcing admission.
 
@@ -106,9 +122,7 @@ class ExecutionControl:
             except ValueError as exc:
                 self._fail("invalid_model_call")
                 raise _ProtocolError("invalid_model_call") from exc
-            if self._calls >= self._request.max_model_calls:
-                self._stop = "budget"
-                raise _Stopped("budget")
+            self._check_budget()
             self._calls += 1
             self._in_flight = True
         try:
