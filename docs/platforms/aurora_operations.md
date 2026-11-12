@@ -58,17 +58,23 @@ python tools/launch_aurora_u2_parity.py --dry-run \
   --source-manifest-sha256 "${PRISM_SOURCE_MANIFEST_SHA256:?}" \
   --account "${PRISM_ACCOUNT:?}" --queue debug --nodes 1 --walltime 00:05:00 \
   --filesystems "${PRISM_FILESYSTEMS:?}" --device xpu:0 --dtype bfloat16 \
-  --python "${PRISM_SITE_PYTHON:?}" --module-use "${PRISM_MODULE_PATH:?}" \
+  --python "${PRISM_SITE_PYTHON:?}" --mpiexec "${PRISM_SITE_MPIEXEC:?}" \
+  --module-use "${PRISM_MODULE_PATH:?}" \
   --module oneapi/release/2025.3.1 \
   --module mpich/prd/5.0.0.aurora_test.51a9474 \
   --module frameworks/2025.3.1
 ```
 
 The generated environment setup always runs `module purge`, every explicit
-`--module-use` directory in order, then each `--module` in order. The supplied
+`--module-use` directory in order, then each `--module` in order. `set -u` is
+suspended for exactly these commands, because Lmod and site modulefiles can read
+unset variables; `set -e` stays on, so a failing module command still ends the
+job with an exit receipt. `module purge` also removes the default `mpiexec` from
+`PATH`, so `--mpiexec` must give the site launcher's absolute path; the script
+never resolves `mpiexec` by name. The supplied
 operator readiness record observed the matching compiler/MPI/framework sequence
-above; incomplete/default module hierarchies failed. The search directory and
-Python path must come from the site's reviewed configuration. The metadata
+above; incomplete/default module hierarchies failed. The search directory,
+Python and mpiexec paths must come from the site's reviewed configuration. The metadata
 readback observed Python 3.12.12, Torch 2.10.0a0+git449b176, Transformers 4.57.6
 and Safetensors 0.7.0; it did not import Torch, run XPU, establish model fit or
 qualify this comparison. Preserve the site's accelerator-aware Torch. This
@@ -81,7 +87,8 @@ not an allocation. `--device` requires `xpu:N` with a nonnegative index; physica
 device existence is unverified. Dtypes are `float32`, `float16` and `bfloat16`.
 The script requires `PBS_JOBID` and a readable, nonempty `PBS_NODEFILE` before
 creating output. After module setup and input checks, it starts **one comparison
-process** using `mpiexec -n 1 --ppn 1` for placement on allocated compute nodes.
+process** using the `--mpiexec` launcher with `-n 1 --ppn 1` for placement on
+allocated compute nodes.
 The explicit `xpu:N` argument is preserved. Requesting two nodes still launches
 only one rank; it does not implement sharding or establish memory fit. PBS
 environment checks are refusal guards, not independent proof of a live job;

@@ -52,8 +52,9 @@ readable, nonempty node file. It rejects symlink components in all input/output
 paths before output creation, redirects or module setup; keep their parent
 directories stable and operator-controlled throughout execution. Early rejection
 has no runtime receipt and remains incomplete. After the checks and ordered
-module setup, `mpiexec -n 1 --ppn 1` launches the unchanged runner argv with its
-explicit indexed XPU. The plan records this separate execution argv. One rank
+module setup (with `set -u` suspended only for the module commands), the
+absolute `--mpiexec` launcher runs `-n 1 --ppn 1` with the unchanged runner
+argv and its explicit indexed XPU; `mpiexec` is never resolved from `PATH`. The plan records this separate execution argv. One rank
 does not establish memory fit or distributed execution. CPU fake allocation/MPI
 fixtures test these contracts; actual scheduler placement still needs separately
 authorized compute-node evidence and independent review.

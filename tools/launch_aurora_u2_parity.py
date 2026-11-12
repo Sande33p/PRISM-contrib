@@ -128,6 +128,9 @@ def _generation_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dtype", choices=("float32", "float16", "bfloat16"), required=True)
     parser.add_argument("--python", required=True, help="absolute site Python executable")
     parser.add_argument(
+        "--mpiexec", required=True, help="absolute site mpiexec; module purge drops PATH's"
+    )
+    parser.add_argument(
         "--module-use", action="append", required=True, help="module search directory"
     )
     parser.add_argument("--module", action="append", required=True, help="module, in load order")
@@ -150,6 +153,7 @@ def _configuration(args: argparse.Namespace) -> dict[str, Any]:
         if name != "output_dir" and _overlap(paths["output_dir"], paths[name]):
             raise ValueError("runtime output must be disjoint from every input")
     _absolute(args.python)
+    mpiexec = _absolute(args.mpiexec)
     _match(args.prism_revision, r"[0-9a-f]{40}", "PRISM revision")
     _match(args.device, r"xpu:(0|[1-9][0-9]*)", "indexed XPU device")
     for name in ("account", "queue"):
@@ -219,7 +223,7 @@ def _configuration(args: argparse.Namespace) -> dict[str, Any]:
         },
         "module_setup": {"purge": True, "use": module_use, "load": modules},
         "argv": argv,
-        "execution_argv": ["mpiexec", "-n", "1", "--ppn", "1", *argv],
+        "execution_argv": [mpiexec, "-n", "1", "--ppn", "1", *argv],
         "cwd": paths["prism_root"],
         "paths": paths,
         "identities": identities,
@@ -291,11 +295,15 @@ def _script(plan: dict[str, Any]) -> bytes:
             "unset OPENAI_API_KEY PAPERCLIP_API_KEY",
             "export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 WANDB_MODE=disabled",
             "export PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1",
+            # Lmod and site modulefiles may read unset variables, which nounset
+            # makes fatal. Suspend it for module setup only; errexit stays on.
+            "set +u",
             "module purge",
         ]
     )
     lines.extend(shlex.join(["module", "use", p]) for p in plan["module_setup"]["use"])
     lines.extend(shlex.join(["module", "load", m]) for m in plan["module_setup"]["load"])
+    lines.append("set -u")
     lines.append(shlex.join(["cd", "--", plan["cwd"]]))
     # Recheck the small identity files at the execution site, without importing
     # Torch/tokenizers. Integration must verify their semantic contents/assets.

@@ -114,6 +114,21 @@ def _added_token(value: Any) -> Any:
     return AddedToken(**{key: val for key, val in value.items() if key != "__type"})
 
 
+def _record_spells_string(key: str, config_value: Any, map_value: Any) -> bool:
+    """Whether special_tokens_map.json spells a bare config string as a record.
+
+    A bare string carries only content, so a record with the same content does
+    not contradict it; the caller confirms the record's flags against
+    added_tokens_decoder. Every other pairing keeps the exact comparison.
+    """
+    return (
+        key != "additional_special_tokens"
+        and type(config_value) is str
+        and type(map_value) is dict
+        and _added_token(map_value).content == config_value
+    )
+
+
 def _construct(artifacts: Mapping[str, bytes]) -> Any:
     """Construct only from data; no injectable public constructor or object."""
     Tokenizer = import_module("tokenizers").Tokenizer
@@ -147,7 +162,12 @@ def _construct(artifacts: Mapping[str, bytes]) -> Any:
     specials = parsed.get("special_tokens_map.json", {})
     if set(specials) - _SPECIAL_KEYS:
         raise ValueError("unsupported special_tokens_map fields")
+    records: list[tuple[str, dict[str, Any]]] = []
     for key, value in specials.items():
+        if key in config and _record_spells_string(key, config[key], value):
+            # Keep the config string; the record is checked against the decoder below.
+            records.append((key, value))
+            continue
         if key in config and _state(_special_value(key, config[key])) != _state(
             _special_value(key, value)
         ):
@@ -171,6 +191,14 @@ def _construct(artifacts: Mapping[str, bytes]) -> Any:
         if converted[int(key)] is None:
             raise ValueError("added tokens cannot be null")
     config["added_tokens_decoder"] = converted
+    # transformers does not read special_tokens_map.json when added_tokens_decoder
+    # is present, so a record admitted above must match the decoder entry that
+    # defines its token: one entry with that content and every flag it states.
+    for key, record in records:
+        entries = [token for token in converted.values() if token.content == record["content"]]
+        flags = record.keys() - {"content", "__type"}
+        if len(entries) != 1 or any(getattr(entries[0], flag) != record[flag] for flag in flags):
+            raise ValueError(f"special token record disagrees with added_tokens_decoder: {key}")
     backend = Tokenizer.from_str(artifacts["tokenizer.json"].decode("utf-8"))
     tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, local_files_only=True, **config)
     vocab = tokenizer.get_vocab()

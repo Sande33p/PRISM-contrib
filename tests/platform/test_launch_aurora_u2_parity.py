@@ -40,6 +40,8 @@ def setup(tmp_path: Path) -> dict:
     for key, path in metadata.items():
         args.extend(["--" + key + "-sha256", hashlib.sha256(path.read_bytes()).hexdigest()])
     plan_dir = root / "plan"
+    mpiexec = root / "site ' mpi ; $PATH" / "mpiexec"
+    mpiexec.parent.mkdir()
     args.extend(
         [
             "--prism-revision",
@@ -62,6 +64,8 @@ def setup(tmp_path: Path) -> dict:
             "bfloat16",
             "--python",
             str(Path(sys.executable).resolve()),
+            "--mpiexec",
+            str(mpiexec),
             "--module-use",
             str(root / "module ' search ; $HOME"),
             "--module",
@@ -72,7 +76,14 @@ def setup(tmp_path: Path) -> dict:
             "framework/3",
         ]
     )
-    return {"root": root, "paths": paths, "metadata": metadata, "args": args, "plan": plan_dir}
+    return {
+        "root": root,
+        "paths": paths,
+        "metadata": metadata,
+        "args": args,
+        "plan": plan_dir,
+        "mpiexec": mpiexec,
+    }
 
 
 def change(args: list[str], flag: str, value: str) -> list[str]:
@@ -114,18 +125,26 @@ def fake_environment(
         + "    printf '%s\\n' \"$*\" >> "
         + shlex.quote(str(order))
         + "\n"
+        # Like the site's Lmod modulefiles, read a variable that is unset.
+        + '    : "$U2_FIXTURE_UNSET_IN_MODULEFILE"\n'
         + ("    return 23\n" if module_failure else "    return 0\n")
         + "}\n"
+        # Decoy: the plan names its launcher; nothing may resolve mpiexec by name.
         + "mpiexec() {\n"
-        + "    printf '%s\\0' \"$@\" > "
-        + shlex.quote(str(setup["root"] / "mpi-argv"))
-        + "\n"
-        + '    [[ "$1" == -n && "$2" == 1 && "$3" == --ppn && "$4" == 1 ]] || return 99\n'
-        + ("    return 42\n" if mpi_failure else "")
-        + "    shift 4\n"
-        + '    "$@"\n'
+        + "    return 98\n"
         + "}\n"
     )
+    setup["mpiexec"].write_text(
+        "#!/bin/bash\n"
+        + "printf '%s\\0' \"$@\" > "
+        + shlex.quote(str(setup["root"] / "mpi-argv"))
+        + "\n"
+        + '[[ "$1" == -n && "$2" == 1 && "$3" == --ppn && "$4" == 1 ]] || exit 99\n'
+        + ("exit 42\n" if mpi_failure else "")
+        + "shift 4\n"
+        + 'exec "$@"\n'
+    )
+    setup["mpiexec"].chmod(0o700)
     nodefile = setup["root"] / "fake-pbs-nodes"
     nodefile.write_text("synthetic-compute-node\n")
     env = dict(os.environ)
@@ -140,6 +159,7 @@ def fake_environment(
             "PBS_NODEFILE": str(nodefile),
         }
     )
+    env.pop("U2_FIXTURE_UNSET_IN_MODULEFILE", None)
     return env
 
 
@@ -221,6 +241,8 @@ def test_validate_local_inputs_binds_exact_manifest_bytes(setup):
         ("--module", "x/../y"),
         ("--module", "x;cmd"),
         ("--module-use", "/tmp/../bad"),
+        ("--mpiexec", "mpiexec"),
+        ("--mpiexec", "/site/../mpiexec"),
         ("--source-root", "relative"),
         ("--source-root", "/a/../b"),
         ("--source-root", "/a\nb"),
@@ -250,6 +272,7 @@ def test_invalid_inputs_fail_before_writes(setup, flag, value):
         "--module-use",
         "--device",
         "--python",
+        "--mpiexec",
     ],
 )
 def test_missing_required_argument_is_rejected(setup, flag):
@@ -348,7 +371,7 @@ def test_generated_script_preserves_argv_modules_streams_and_exit_status(setup, 
     assert json.loads((root / "argv.json").read_text()) == p["argv"][2:]
     mpi_argv = (setup["root"] / "mpi-argv").read_bytes().decode().split("\0")[:-1]
     assert mpi_argv == ["-n", "1", "--ppn", "1", *p["argv"]]
-    assert p["execution_argv"] == ["mpiexec", *mpi_argv]
+    assert p["execution_argv"] == [str(setup["mpiexec"]), *mpi_argv]
     assert (setup["root"] / "module-order").read_text().splitlines() == [
         "purge",
         "use " + p["module_setup"]["use"][0],
@@ -495,6 +518,16 @@ def test_mpi_failure_keeps_exit_receipt_without_running_comparison(setup):
     assert not (root / "argv.json").exists()
     assert (root / "stdout.log").is_file()
     assert (root / "stderr.log").is_file()
+
+
+def test_nounset_is_suspended_only_for_module_setup(setup):
+    plan(setup)
+    lines = (setup["plan"] / "job.sh").read_text().splitlines()
+    first = lines.index("module purge")
+    last = max(i for i, line in enumerate(lines) if line.startswith("module "))
+    assert lines.index("set -euo pipefail") < first
+    assert lines[first - 1] == "set +u" and lines[last + 1] == "set -u"
+    assert lines.count("set +u") == 1 and lines.count("set -u") == 1
 
 
 def test_module_failure_has_exit_receipt_and_no_result(setup):

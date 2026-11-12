@@ -71,8 +71,10 @@ def artifacts():
 def aurora_metadata_artifacts(artifacts):
     """Synthetic vocabulary with the operator-observed JSON metadata shape.
 
-    Only scalar metadata, special-map keys and the decoder count are matched;
-    these generated tokens/IDs are not a copy of the checkpoint tokenizer.
+    Only scalar metadata, special-map keys, the per-file special-token shapes
+    (records in special_tokens_map.json, bare strings in tokenizer_config.json)
+    and the decoder count are matched; these generated tokens/IDs are not a
+    copy of the checkpoint tokenizer.
     """
     from tokenizers import Tokenizer
 
@@ -94,9 +96,11 @@ def aurora_metadata_artifacts(artifacts):
         "mask_token": "<|mask|>",
         "pad_token": "<|endoftext|>",
     }
+    flags = {"lstrip": False, "normalized": False, "rstrip": False, "single_word": False}
+    records = {key: {"content": token, **flags} for key, token in specials.items()}
     return {
         "tokenizer.json": serialized,
-        "special_tokens_map.json": encode_json(specials),
+        "special_tokens_map.json": encode_json(records),
         "tokenizer_config.json": encode_json(
             {
                 **specials,
@@ -365,6 +369,76 @@ def test_aurora_metadata_is_inert_and_preserves_binding(aurora_metadata_artifact
     ):
         with pytest.raises(ValueError, match="conflicting|disagrees"):
             bind({**aurora_metadata_artifacts, **sidecar})
+
+
+def test_aurora_special_token_records_bind_like_bare_strings(aurora_metadata_artifacts):
+    # The config strings and added_tokens_decoder define these tokens, as in
+    # transformers; agreeing records in special_tokens_map.json change nothing.
+    records = json.loads(aurora_metadata_artifacts["special_tokens_map.json"])
+    assert all(type(record) is dict for record in records.values())
+    bound = bind(aurora_metadata_artifacts)
+    strings = {key: record["content"] for key, record in records.items()}
+    plain = bind({**aurora_metadata_artifacts, "special_tokens_map.json": encode_json(strings)})
+    assert plain.tokenizer_digest != bound.tokenizer_digest
+    assert (
+        plain.construction_provenance["object_state_sha256"]
+        == (bound.construction_provenance["object_state_sha256"])
+    )
+    assert plain.render(system_prompt="S", user_text="U").prompt_ids == (
+        bound.render(system_prompt="S", user_text="U").prompt_ids
+    )
+    assert bound.tokenizer.bos_token == "<|startoftext|>"
+    assert bound.tokenizer.pad_token == bound.tokenizer.eos_token == "<|endoftext|>"
+
+
+@pytest.mark.parametrize(
+    ("record", "match"),
+    [
+        ({"content": "<|endoftext|>"}, "conflicting special token configuration: bos_token"),
+        ({"content": "<|startoftext|>", "lstrip": True}, "disagrees with added_tokens_decoder"),
+        ({"content": "<|startoftext|>", "special": False}, "disagrees with added_tokens_decoder"),
+        ({"content": "<|startoftext|>", "lstrip": 0}, "AddedToken flags must be boolean"),
+        ({"content": "<|startoftext|>", "id": 157173}, "unsupported AddedToken fields"),
+    ],
+)
+def test_aurora_special_token_record_must_match_decoder(aurora_metadata_artifacts, record, match):
+    records = json.loads(aurora_metadata_artifacts["special_tokens_map.json"])
+    candidate = {
+        **aurora_metadata_artifacts,
+        "special_tokens_map.json": encode_json({**records, "bos_token": record}),
+    }
+    with pytest.raises(ValueError, match=match):
+        bind(candidate)
+
+
+def test_other_special_token_shapes_keep_exact_comparison(artifacts, aurora_metadata_artifacts):
+    # Without added_tokens_decoder, transformers would apply the record itself.
+    no_decoder = {
+        **artifacts,
+        "special_tokens_map.json": encode_json({"unk_token": {"content": "[UNK]"}}),
+    }
+    with pytest.raises(ValueError, match="disagrees with added_tokens_decoder: unk_token"):
+        bind(no_decoder)
+    # A config record against a map string still conflicts, as do token lists.
+    config = json.loads(aurora_metadata_artifacts["tokenizer_config.json"])
+    records = json.loads(aurora_metadata_artifacts["special_tokens_map.json"])
+    swapped = {
+        **aurora_metadata_artifacts,
+        "tokenizer_config.json": encode_json({**config, "bos_token": records["bos_token"]}),
+        "special_tokens_map.json": encode_json({**records, "bos_token": "<|startoftext|>"}),
+    }
+    with pytest.raises(ValueError, match="conflicting special token configuration: bos_token"):
+        bind(swapped)
+    base = json.loads(artifacts["tokenizer_config.json"])
+    lists = {
+        **artifacts,
+        "tokenizer_config.json": encode_json({**base, "additional_special_tokens": ["<answer>"]}),
+        "special_tokens_map.json": encode_json(
+            {"additional_special_tokens": [{"content": "<answer>"}]}
+        ),
+    }
+    with pytest.raises(ValueError, match="conflicting special token configuration: additional"):
+        bind(lists)
 
 
 @pytest.mark.parametrize(
