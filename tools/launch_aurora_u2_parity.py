@@ -82,13 +82,24 @@ def _read_file(path: Path) -> bytes:
     return data
 
 
-def _object(data: bytes) -> dict[str, Any]:
+def _finite_json(data: bytes) -> Any:
     def reject_constant(value: str) -> None:
         raise ValueError("non-finite JSON is unsupported")
 
-    result = json.loads(data, parse_constant=reject_constant)
+    return json.loads(data, parse_constant=reject_constant)
+
+
+def _object(data: bytes) -> dict[str, Any]:
+    result = _finite_json(data)
     if not isinstance(result, dict):
         raise ValueError("expected a JSON object")
+    return result
+
+
+def _object_list(data: bytes) -> list[dict[str, Any]]:
+    result = _finite_json(data)
+    if not result or not isinstance(result, list) or not all(isinstance(e, dict) for e in result):
+        raise ValueError("expected a non-empty JSON list of objects")
     return result
 
 
@@ -181,7 +192,10 @@ def _configuration(args: argparse.Namespace) -> dict[str, Any]:
         state = "declared_remote_unverified"
         if args.validate_local_inputs:
             data = _read_file(_local_path(paths[name]))
-            _object(data)
+            if name == "source_manifest":
+                _object_list(data)  # preflight_u2 reads one entry per pinned source file
+            else:
+                _object(data)
             if _sha(data) != digest:
                 raise ValueError(name + " SHA256 mismatch")
             state = "local_file_hash_verified"

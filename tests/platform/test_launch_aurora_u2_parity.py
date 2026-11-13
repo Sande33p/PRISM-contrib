@@ -12,9 +12,16 @@ import sys
 from pathlib import Path
 
 import pytest
+from src.backends import u2_preflight as preflight
 from tools import launch_aurora_u2_parity as launcher
 
 pytestmark = [pytest.mark.unit, pytest.mark.launcher]
+
+# preflight_u2's source-manifest format: one entry per pinned source file.
+SOURCE_MANIFEST = [
+    {"path": name, "sha256": digest, "revision": preflight.SOURCE_REVISION}
+    for name, digest in preflight.SOURCE_HASHES.items()
+]
 
 
 @pytest.fixture
@@ -32,7 +39,8 @@ def setup(tmp_path: Path) -> dict:
     metadata = {}
     for name in ("acceptance-file", "asset-manifest", "source-manifest"):
         path = root / (name + " ' .json")
-        path.write_text(json.dumps({"synthetic": True, "identity": name}) + "\n")
+        value = {"synthetic": True, "identity": name}
+        path.write_text(json.dumps(SOURCE_MANIFEST if name == "source-manifest" else value) + "\n")
         metadata[name] = path
     args = []
     for key, path in {**paths, **metadata}.items():
@@ -329,11 +337,35 @@ def test_local_validation_failures(setup, failure):
     elif failure == "missing-file":
         setup["metadata"]["asset-manifest"].unlink()
     elif failure == "changed-hash":
-        setup["metadata"]["source-manifest"].write_text('{"changed": true}')
+        setup["metadata"]["source-manifest"].write_text('[{"changed": true}]')
     else:
         setup["metadata"]["acceptance-file"].write_text("invalid JSON")
     with pytest.raises(SystemExit):
         launcher.main(setup["args"] + ["--validate-local-inputs"])
+    assert not setup["plan"].exists()
+
+
+NOT_AN_ENTRY_LIST = "expected a non-empty JSON list of objects"
+
+
+@pytest.mark.parametrize(
+    "name,text,message",
+    [
+        ("source-manifest", '{"synthetic": true}', NOT_AN_ENTRY_LIST),
+        ("source-manifest", "[]", NOT_AN_ENTRY_LIST),
+        ("source-manifest", '[{"path": "LICENSE"}, 1]', NOT_AN_ENTRY_LIST),
+        ("source-manifest", '[{"sha256": NaN}]', "non-finite JSON is unsupported"),
+        ("asset-manifest", "[{}]", "expected a JSON object"),
+        ("acceptance-file", "[{}]", "expected a JSON object"),
+    ],
+)
+def test_local_validation_checks_each_identity_shape(setup, capsys, name, text, message):
+    path = setup["metadata"][name]
+    path.write_text(text)
+    args = change(setup["args"], f"--{name}-sha256", hashlib.sha256(path.read_bytes()).hexdigest())
+    with pytest.raises(SystemExit):
+        launcher.main(args + ["--validate-local-inputs"])
+    assert message in capsys.readouterr().err
     assert not setup["plan"].exists()
 
 
