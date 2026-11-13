@@ -6,12 +6,106 @@ scripts here are
 skeletons; the real validated invocations are documented inline in
 this README and were used to validate phase 2 PRs on 2026-05-15.
 
-All scripts assume:
+The historical training scripts below assume:
 
 - `module load frameworks/2025.3.1` has been run (or is run inside the script).
 - The caller is on a UAN. Any compute-node work goes through
   `tools/launch_aurora_daos.py` (typically `--batch` for hands-off
   validation or `--run-via-ssh` for interactive iteration on a hold).
+
+## U2 text parity transport
+
+The independent U2 prerequisite uses `tools/launch_aurora_u2_parity.py` and the
+Integration entry point `tools/parity/u2_text.py`. It does not use the
+training scripts or generic token-embedding path. See the
+[Aurora preparation guide](../../docs/platforms/aurora_operations.md#u2-text-parity-preparation)
+for required launcher options, module purge/use/load ordering and execution gates.
+The launcher itself has no submission or execution mode. CPU fixtures prove
+packaging/failure behavior only, never model/XPU/checkpoint parity.
+
+Generation creates only `job.sh` and `launch-plan.json` in a new private plan
+directory. Stage those unchanged bytes through the separately admitted operator
+transport, verify their hashes, and retain the plan with private runtime evidence.
+The eventual plan/submission directory must be private, canonical, symlink-free
+and disjoint from inputs and runtime outputs, with unused scheduler-spool names.
+Fixed relative PBS stdout/stderr names do not establish that safety; PBS may
+open them before script checks. The operator must verify the execution-site
+location after transport. Remote dry-run existence and path safety remain
+unverified.
+The generated runner argv passes source-root, checkpoint-root, output-dir,
+acceptance-file, asset-manifest, source-manifest, device and dtype unchanged. The
+PRISM root is its working directory. Exact manifest hashes are checked again by
+the script before the runner; verifying their semantics and actual source/model
+binding remains Integration's responsibility. The launcher never invents sampler
+defaults, expected outputs or Evaluation's numerical thresholds.
+
+An optional `--run-context /absolute/private/context.json` is forwarded unchanged
+to the runner. It carries reviewed acceptance/instrumentation identities, ordered
+modules, allocation evidence and the complete source-manifest identity. With
+`--validate-local-inputs`, the launcher validates its bounded JSON object and records
+its SHA256 for the script to recheck. Paths/content remain private; sanitized
+collection omits them. Missing context or observed PBS/module evidence is incomplete;
+declared/observed mismatches fail. Context does not grant execution authority.
+
+The generated script refuses execution without PBS allocation metadata and a
+readable, nonempty node file. It rejects symlink components in all input/output
+paths before output creation, redirects or module setup; keep their parent
+directories stable and operator-controlled throughout execution. Early rejection
+has no runtime receipt and remains incomplete. After the checks and ordered
+module setup (with `set -u` suspended only for the module commands), the
+absolute `--mpiexec` launcher runs `-n 1 --ppn 1` with the unchanged runner
+argv and its explicit indexed XPU; `mpiexec` is never resolved from `PATH`. The plan records this separate execution argv. One rank
+does not establish memory fit or distributed execution. CPU fake allocation/MPI
+fixtures test these contracts; actual scheduler placement still needs separately
+authorized compute-node evidence and independent review.
+
+After an authorized run and a separately authorized copy of its private evidence,
+collect a sanitized summary locally with an explicit filename allowlist:
+
+```bash
+python tools/launch_aurora_u2_parity.py collect \
+  --output-dir "${PRISM_PRIVATE_RESULT_DIR:?}" \
+  --collection-dir "${PRISM_NEW_COLLECTION_DIR:?}" \
+  --launch-plan "${PRISM_PLAN_DIR:?}/launch-plan.json" \
+  --include stdout.log --include stderr.log \
+  --include exit-status.json --include result.json
+```
+
+Both local input and destination paths must be canonical and free of symlinks;
+the destination must be new, with an existing parent and outside the input area.
+There is no recursive copy. Only the four names above are accepted; duplicate
+names, path traversal, symlinks, hardlinks, non-regular files and files over 8 MiB
+are rejected before writing. Thus selected raw evidence is bounded to 32 MiB
+(plus an 8 MiB launch plan); oversized traces stay in private storage for separate
+review. Files outside the allowlist, including model/tokenizer bytes, are never
+read. An existing collection directory is never overwritten.
+
+`stdout.log` and `stderr.log` remain separate but contain only omission notices.
+`exit-status.json` retains the validated exit code and matching launch identity.
+`result.json` retains only a fixed-enum `reported_status` and an explicit
+incomplete summary: free-text failures, prompts, identities, paths and traces are
+omitted wholesale. This intentionally avoids claiming that pattern matching can
+find every credential. Unknown exit/result fields are never copied. Raw files
+are not modified, and these sanitized summaries do not replace raw evidence.
+
+`artifact-manifest.json` has schema version 1, sorted relative file entries,
+exported byte lengths and SHA256s, separate source byte lengths/SHA256s, explicit
+transformation labels, the launch-plan hash, missing required names and
+`parity_accepted=false`. It does not hash itself. `transport_complete` means all
+four files and valid envelope/exit binding were collected; even a nonzero exit
+can have complete failure evidence. It is **not** a successful execution or
+parity verdict. Missing files are not manufactured; an incomplete collection is
+saved with CLI exit code 2. Invalid receipts/inputs fail without a collection.
+Generation and complete collection return 0; usage/validation errors return 2.
+
+Before admitted execution, independent Harness review checks the exact code
+revision and Evaluation freezes its criteria. Mac-owned SSH/PBS transport is
+independent of the unresolved remote Codex sandbox; no sandbox bypass is needed
+or authorized. After execution, independent Evaluation must inspect the private,
+exact-revision source/asset identities, observed runtime/job identity, traces,
+numerical comparisons and
+terminal semantics against its previously frozen criteria. No successful verdict
+can be inferred from an author-supplied status or the public transport summary.
 
 ## Scripts
 

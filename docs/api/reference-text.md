@@ -7,8 +7,9 @@ and retains terminal receipts for replay within one adapter instance.
 
 `src.backends.u2_text_runtime.U2TextRuntime` now implements the pinned greedy
 text loop with an explicitly supplied local model. The renderer and metadata
-preflight are separate, dependency-free modules. No loader or weights are
-provided, and checkpoint-backed execution remains unqualified. The global
+preflight are separate, dependency-free modules. A strict offline loader is
+available for explicit use; weights are not provided, and checkpoint-backed
+execution remains unqualified. The global
 `u2_reference` and `u2_native` selectors remain planned and raise
 `NotImplementedError`; selecting them in `ModelConfig` does not activate this
 adapter. Existing local/HF model construction, checkpoint keys and chat
@@ -291,8 +292,10 @@ cannot detect a dishonest binding or all internal model mutations. Synthetic
 models must be explicitly identified in `runtime_id`; they are never a fallback.
 
 Supported declared dtypes are float32, float16 and bfloat16. CPU devices must
-be unindexed; CUDA declarations must specify an explicit index. Other devices
-are rejected. Only synthetic CPU execution has been tested; allowing a CUDA
+be unindexed; CUDA and XPU declarations must specify an explicit index (`cuda:N`
+or `xpu:N`). Other devices are rejected. This validates metadata without probing
+availability or falling back to another device. Only synthetic CPU execution has
+been tested; allowing an accelerator
 declaration is not accelerator qualification or execution authorization.
 
 Each request reserves `P + 1 + max_new_tokens` against inspected capacity.
@@ -358,3 +361,92 @@ or accelerator result is established. Exact artifact-to-object binding,
 identical-checkpoint direct-upstream parity, durable receipts, transport
 cancellation, mid-kernel interruption and device-release guarantees remain
 separate qualification work. No global backend is enabled by these tests.
+
+
+## Strict local loading and private comparison
+
+`src.backends.u2_checkpoint` verifies independently admitted immutable manifests
+before binding model objects. Checkpoint entries map only through an explicit
+`nvidia/` prefix to a checkpoint root named `nvidia`. It checks original Git-blob
+SHA1 identities for small files and LFS SHA256 identities for large files, and
+records a fresh SHA256 for every consumed file. A prior verification receipt is
+additional evidence, not a replacement trust input. Missing, extra, duplicate,
+unsafe and symlink inputs fail closed.
+
+The loader validates the complete index and safetensors headers, split experts,
+eight channels, every constructed state key, shape and dtype, and read-back tensor
+bytes. Each shard is read into a bounded owned byte buffer, verified against its
+admitted size/SHA256, then deserialized from that same immutable buffer. A pathname
+swap cannot substitute unverified parameter bytes. Peak host storage includes the
+model, the largest serialized shard (approximately 5 GB), deserializer tensors and
+per-tensor hashing copies; production memory fit is unmeasured. Allocation failures
+propagate without returning a partial model. No implicit dtype conversion is admitted.
+Checkpoint-bundled Python is verified as an artifact but is never imported as the
+pinned Git oracle. The six-entry preflight manifest remains separate from the
+complete source/imported-module manifest. The optional `source_manifest` keyword
+on `preflight_u2` permits a separate six-entry file without copying it into the
+source checkout. Inputs and their ancestors must be operator-controlled during a
+run; integrity checks are not a filesystem sandbox.
+
+The bound model checks parameters, all buffers (including nonpersistent rotary
+state), module registration, execution attributes, callable identities/code/defaults,
+partial arguments, class helpers, hooks and configuration. Full byte checks bracket
+comparison paths. Ordinary mutation fails before another forward; arbitrary hostile
+in-process Python and concurrent mutation are outside this boundary.
+
+`U2PreflightReport.vocab_size` and `RuntimeIdentity.vocab_size` describe the model
+logit domain. `tokenizer_vocab_size` records serialized tokenizer cardinality;
+`BoundTextTokenizer.vocab_size` records the actual constructed tokenizer. Prepared
+metadata reports 157177 serialized IDs versus 157184 model positions. The seven
+additional positions are not established padding. Strict loading and observed
+output shapes are separate qualification steps. All logits and selected IDs are
+preserved. Selecting a position absent from the tokenizer produces an explicit
+incomplete decoding result, never invented IDs or hidden logit masking.
+The strict loader sets `LocalModelSpec.prompt_vocab_size` from its actual bound
+tokenizer and checks it against preflight. External prompt IDs must be below that
+limit before the first forward. This optional field defaults to `None` for existing
+injected CPU/CUDA fixtures, preserving their declared model-domain admission.
+It never restricts generated IDs or the 157184-column output domain.
+
+`tools/parity/u2_text.py` accepts the inherited launcher's `--source-root`,
+`--checkpoint-root`, `--output-dir`, `--acceptance-file`, `--asset-manifest`,
+`--source-manifest`, `--device` and `--dtype`. Its optional `--run-context` names
+private JSON containing `acceptance_document_revision`,
+`oracle_instrumentation_diff_and_review`, `modules_in_order`, `authorized_job_id`,
+`execution_allocation`, `imported_source_manifest` and
+`imported_source_manifest_sha256`. Supply reviewed evidence and original trust
+identities; these fields do not grant execution authority. The runner corroborates
+job identity and ordered loaded modules with `PBS_JOBID` and `LOADEDMODULES`.
+Missing context or observations stay incomplete; mismatches fail. The dry-run
+launcher forwards the optional `--run-context` path with the same shell quoting and
+input/output separation checks as other inputs. Local validation records its hash;
+the emitted script checks that hash when available. Raw context and paths stay in
+private plans/results and are omitted from sanitized collection.
+
+The comparison invokes actual pinned `generate_text_bd`, sharing the bound model,
+tokenizer, device/dtype and frozen settings with PRISM. Read-only tracing observes
+sampler locals and every forward entry/return, including zero-transfer steps.
+Full logits and masks remain in private binary sidecars with shapes, dtypes and
+hashes. Both frozen path orders independently reset RNG. Partial failures and
+missing EOA/length coverage remain visible. Numeric summaries use the frozen
+per-scalar thresholds. Raw comparison status is distinct from independent
+Evaluation acceptance; the driver never emits `independently-validated`.
+
+**Restricted import profile:** `split-only-v1` replaces exactly the two pinned
+imports of `fused_moe_forward` and `get_parallel_state` with explicit unsupported
+guards. Only the excluded packed expert branch calls these symbols. The original
+model bytes and every computation body remain unchanged; original and compiled
+SHA256s plus the exact import replacement are recorded. The actual split/eight-channel
+configuration and constructed experts are checked. Genuine VeOmni utilities,
+logging, Torch, Transformers and tokenbridge/timm components remain in use. Optional
+`veomni_patch` and Liger packages on the effective path or already loaded are rejected
+before relevant imports; stale pyc files never supply pinned code.
+
+A tiny pinned-source synthetic-weight CPU test exercises genuine model construction,
+strict loading and BF16 forward using an existing timm 1.0.22 environment. This is
+source-path evidence only. Genuine timm is missing from the recorded Aurora runtime;
+dependency preparation is separately authorized work, and no substitute is supplied.
+Actual XPU execution, real tokenizer/checkpoint binding, memory fit and independent
+exact-revision adaptation review remain pending.
+The pinned loader's BF16/SDPA semantics are retained; optional diagnostic dtype
+conversion is not implemented. Global U2 selectors remain unavailable.
